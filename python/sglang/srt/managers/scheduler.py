@@ -223,6 +223,8 @@ class GenerationBatchResult:
 
     # relay path: forward stream -> next step forward
     next_draft_input: Optional[EagleDraftInput] = None
+    output_embeds: Optional[torch.Tensor] = None
+    output_ids: Optional[torch.Tensor] = None
 
     def copy_to_cpu(self, return_logprob: bool = False):
         """Copy tensors to CPU in overlap scheduling.
@@ -2248,6 +2250,14 @@ class Scheduler(
             #       we shall still keep the original outputs, e.g. next_token_ids
             #       in the GenerationBatchOutput for processing after copy_done.
             batch.output_ids = future_indices_or_next_token_ids
+            batch.output_embeds = batch_result.output_embeds
+            if batch_result.output_ids is not None:
+                for req_idx, req in enumerate(batch.reqs):
+                    info_key = "aux_output_tokens"
+                    if req.is_chunked <= 0:
+                        if info_key not in req.aux_output_infos:
+                            req.aux_output_infos[info_key] = []
+                        req.aux_output_infos[info_key].append(batch_result.output_ids[req_idx].tolist())
 
             # These 2 values are needed for processing the output, but the values can be
             # modified by overlap schedule. So we have to copy them here so that

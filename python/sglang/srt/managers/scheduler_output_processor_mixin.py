@@ -713,6 +713,7 @@ class SchedulerOutputProcessorMixin:
         spec_verify_ct = []
         spec_accepted_tokens = []
         output_hidden_states = None
+        aux_info = []
 
         if return_logprob:
             input_token_logprobs_val = []
@@ -797,6 +798,12 @@ class SchedulerOutputProcessorMixin:
                 req.send_decode_id_offset = len(decode_ids)
                 read_offsets.append(read_offset)
                 output_ids.append(req.output_ids[send_token_offset:])
+                if len(req.aux_output_infos) > 0:
+                    aux_info_dic = {}
+                    for key, value in req.aux_output_infos.items():
+                        assert len(value) == len(req.output_ids)
+                        aux_info_dic[key] = value[send_token_offset:]
+                    aux_info.append(aux_info_dic)
                 req.send_token_offset = len(req.output_ids)
                 skip_special_tokens.append(req.sampling_params.skip_special_tokens)
                 spaces_between_special_tokens.append(
@@ -928,6 +935,7 @@ class SchedulerOutputProcessorMixin:
                     rids=rids,
                     placeholder_tokens_idx=None,
                     placeholder_tokens_val=None,
+                    aux_info=aux_info if len(aux_info) > 0 else None
                 )
             )
 

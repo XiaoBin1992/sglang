@@ -308,6 +308,7 @@ class ModelConfig:
             or "DeepseekV3ForCausalLMNextN" in self.hf_config.architectures
             or "LongcatFlashForCausalLM" in self.hf_config.architectures
             or "LongcatFlashForCausalLMNextN" in self.hf_config.architectures
+            or "LongcatFlashOmniForCausalLM" in self.hf_config.architectures
             or "DotsVLMForCausalLM" in self.hf_config.architectures
         ):
             self.head_dim = 256
@@ -386,7 +387,8 @@ class ModelConfig:
         self.hidden_size = self.hf_text_config.hidden_size
         self.num_hidden_layers = self.hf_text_config.num_hidden_layers
         self.num_attention_layers = self.num_hidden_layers
-        if "LongcatFlashForCausalLM" in self.hf_config.architectures:
+        if "LongcatFlashForCausalLM" in self.hf_config.architectures \
+            or "LongcatFlashOmniForCausalLM" in self.hf_config.architectures:
             self.num_attention_layers = self.num_hidden_layers * 2
         self.num_nextn_predict_layers = getattr(
             self.hf_text_config, "num_nextn_predict_layers", None

@@ -852,6 +852,7 @@ class BatchTokenIDOutput(BaseBatchReq):
     # The trainer step id. Used to know which step's weights are used for sampling.
     token_steps: List[List[int]] = None
 
+    aux_info: List[Dict] = None
 
 @dataclass
 class BatchMultimodalDecodeReq(BaseBatchReq):
@@ -925,6 +926,7 @@ class BatchStrOutput(BaseBatchReq):
 
     # The trainer step id. Used to know which step's weights are used for sampling.
     token_steps: List[List[int]] = None
+    aux_info: List[Dict] = None
 
 
 @dataclass

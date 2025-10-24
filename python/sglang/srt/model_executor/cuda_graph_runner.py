@@ -289,6 +289,7 @@ class CudaGraphRunner:
         # Graph inputs
         with torch.device(self.device):
             self.input_ids = torch.zeros((self.max_num_token,), dtype=torch.int64)
+            self.input_embeds = torch.zeros((self.max_num_token, self.model_runner.model_config.hidden_size), dtype=torch.bfloat16)
             self.req_pool_indices = torch.zeros((self.max_bs,), dtype=torch.int32)
             self.seq_lens = torch.full(
                 (self.max_bs,), self.seq_len_fill_value, dtype=torch.int32
@@ -520,6 +521,7 @@ class CudaGraphRunner:
 
         # Graph inputs
         input_ids = self.input_ids[:num_tokens]
+        input_embeds = self.input_embeds[:num_tokens] if self.model_runner.model_emb_base_loop else None
         req_pool_indices = self.req_pool_indices[:bs]
         seq_lens = self.seq_lens[:bs]
         seq_lens_cpu = self.seq_lens_cpu[:bs]
@@ -591,6 +593,7 @@ class CudaGraphRunner:
             forward_mode=self.capture_forward_mode,
             batch_size=bs,
             input_ids=input_ids,
+            input_embeds=input_embeds,
             req_pool_indices=req_pool_indices,
             seq_lens=seq_lens,
             seq_lens_cpu=seq_lens_cpu,
@@ -646,7 +649,8 @@ class CudaGraphRunner:
                 kwargs["pp_proxy_tensors"] = PPProxyTensors(
                     {k: v.clone() for k, v in pp_proxy_tensors.tensors.items()}
                 )
-
+            if self.model_runner.model_emb_base_loop:
+                kwargs["input_embeds"] = input_embeds
             logits_output_or_pp_proxy_tensors = forward(
                 input_ids,
                 forward_batch.positions,
@@ -730,6 +734,8 @@ class CudaGraphRunner:
 
         # Common inputs
         self.input_ids[:raw_num_token].copy_(forward_batch.input_ids)
+        if self.model_runner.model_emb_base_loop:
+            self.input_embeds[:raw_num_token].copy_(forward_batch.input_embeds)
         self.req_pool_indices[:raw_bs].copy_(forward_batch.req_pool_indices)
         self.seq_lens[:raw_bs].copy_(forward_batch.seq_lens)
         self.out_cache_loc[:raw_num_token].copy_(forward_batch.out_cache_loc)

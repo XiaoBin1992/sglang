@@ -273,7 +273,7 @@ class TpModelWorker:
             ):
 
                 def sample_batch_func():
-                    batch_result.next_token_ids = self.model_runner.sample(
+                    batch_result.next_token_ids, batch_result.output_ids, batch_result.output_embeds = self.model_runner.sample(
                         logits_output, forward_batch
                     )
                     return batch_result
@@ -298,10 +298,9 @@ class TpModelWorker:
                         logits_output, model_worker_batch
                     )
             else:
-                batch_result.next_token_ids = self.model_runner.sample(
+                batch_result.next_token_ids, batch_result.output_ids, batch_result.output_embeds = self.model_runner.sample(
                     logits_output, forward_batch
                 )
-
             return batch_result
         else:
             pp_proxy_tensors, can_run_cuda_graph = self.model_runner.forward(

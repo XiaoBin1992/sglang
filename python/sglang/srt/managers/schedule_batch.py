@@ -451,6 +451,7 @@ class Req:
         self.origin_input_ids = origin_input_ids
         # Each decode stage's output ids
         self.output_ids = []
+        self.aux_output_infos = {}
         # fill_ids = origin_input_ids + output_ids. Updated if chunked.
         self.fill_ids = []
         self.session_id = session_id
@@ -929,6 +930,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     # The output locations of the KV cache
     out_cache_loc: torch.Tensor = None  # shape: [b], int64
     output_ids: torch.Tensor = None  # shape: [b], int64
+    output_embeds: torch.Tensor = None  # shape: [b], bfloat16
 
     # For multimodal inputs
     multimodal_inputs: Optional[List] = None
@@ -1360,10 +1362,16 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             req.extend_input_len = 1
 
         input_ids = torch.cat([self.input_ids, running_batch.input_ids])
+        input_embeds = self.input_embeds
+        if running_batch.input_embeds is not None:
+            assert self.input_embeds is not None
+            input_embeds = torch.cat([self.input_embeds, running_batch.input_embeds])
+        input_ids = torch.cat([self.input_ids, running_batch.input_ids])
         out_cache_loc = torch.cat([self.out_cache_loc, running_batch.out_cache_loc])
 
         self.merge_batch(running_batch)
         self.input_ids = input_ids
+        self.input_embeds = input_embeds
         self.out_cache_loc = out_cache_loc
 
         # For overlap scheduler, the output_ids has one step delay
@@ -1556,6 +1564,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         # Update fields
         self.input_ids = self.output_ids
         self.output_ids = None
+        self.input_embeds = self.output_embeds
+        self.output_embeds = None
 
         if self.model_config.is_encoder_decoder:
             self.prepare_encoder_info_decode()
@@ -1632,6 +1642,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         self.out_cache_loc = None
         self.seq_lens_sum = self.seq_lens.sum().item()
         self.output_ids = self.output_ids[keep_indices_device]
+        if self.output_embeds is not None:
+            self.output_embeds = self.output_embeds[keep_indices_device]
         self.return_logprob = any(req.return_logprob for req in self.reqs)
         if self.return_logprob:
             self.top_logprobs_nums = [self.top_logprobs_nums[i] for i in keep_indices]
@@ -1678,6 +1690,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         self.seq_lens_sum += other.seq_lens_sum
         if self.output_ids is not None:
             self.output_ids = torch.cat([self.output_ids, other.output_ids])
+        if self.output_embeds is not None:
+            self.output_embeds = torch.cat([self.output_embeds, other.output_embeds])
         if self.return_logprob and other.return_logprob:
             self.top_logprobs_nums.extend(other.top_logprobs_nums)
             self.token_ids_logprobs.extend(other.token_ids_logprobs)
@@ -1766,6 +1780,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             ),
             extend_input_logprob_token_ids=self.extend_input_logprob_token_ids,
             is_prefill_only=self.is_prefill_only,
+            reqs=self.reqs
         )
 
     def copy(self):
@@ -1874,3 +1889,5 @@ class ModelWorkerBatch:
 
     # Whether this batch is prefill-only (no token generation needed)
     is_prefill_only: bool = False
+
+    reqs: List[Req] = None

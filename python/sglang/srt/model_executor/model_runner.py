@@ -920,6 +920,7 @@ class ModelRunner:
                 raise ValueError(
                     f"TP rank {self.tp_rank} could finish the model loading, but there are other ranks that didn't finish loading. It is likely due to unexpected failures (e.g., OOM) or a slow node."
                 ) from None
+        self.model_emb_base_loop = hasattr(self.model, "sample")
 
     def update_expert_location(
         self,
@@ -2063,6 +2064,8 @@ class ModelRunner:
         kwargs = {}
         if self.support_pp:
             kwargs["pp_proxy_tensors"] = pp_proxy_tensors
+        if self.model_emb_base_loop:
+            kwargs["input_embeds"] = forward_batch.input_embeds.bfloat16()
         return self.model.forward(
             forward_batch.input_ids,
             forward_batch.positions,
@@ -2252,22 +2255,31 @@ class ModelRunner:
                 axis=-1,
             )
 
-        self._preprocess_logits(logits_output, forward_batch.sampling_info)
-        # Sample the next tokens
-        next_token_ids = self.sampler(
-            logits_output,
-            forward_batch.sampling_info,
-            forward_batch.return_logprob,
-            forward_batch.top_logprobs_nums,
-            forward_batch.token_ids_logprobs,
-            # For prefill, we only use the position of the last token.
-            (
-                forward_batch.positions
-                if forward_batch.forward_mode.is_decode()
-                else forward_batch.seq_lens - 1
-            ),
-        )
-        return next_token_ids
+        def sample_func(logits_output, forward_batch):
+            self._preprocess_logits(logits_output, forward_batch.sampling_info)
+
+            # Sample the next tokens
+            next_token_ids = self.sampler(
+                logits_output,
+                forward_batch.sampling_info,
+                forward_batch.return_logprob,
+                forward_batch.top_logprobs_nums,
+                forward_batch.token_ids_logprobs,
+                # For prefill, we only use the position of the last token.
+                (
+                    forward_batch.positions
+                    if forward_batch.forward_mode.is_decode()
+                    else forward_batch.seq_lens - 1
+                ),
+            )
+            return next_token_ids
+        if self.model_emb_base_loop:
+            next_token_ids, other_ids, other_emb = self.model.sample(forward_batch, sample_func, logits_output)
+            return next_token_ids, other_ids, other_emb
+
+        else:
+            return sample_func(logits_output, forward_batch), None, None
+
 
     def compute_logprobs_only(
         self,

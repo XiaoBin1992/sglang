@@ -141,6 +141,7 @@ class ReqState:
     input_token_ids_logprobs_idx: List = dataclasses.field(default_factory=list)
     output_token_ids_logprobs_val: List = dataclasses.field(default_factory=list)
     output_token_ids_logprobs_idx: List = dataclasses.field(default_factory=list)
+    aux_info: Dict = None
 
 
 class TokenizerManager(TokenizerCommunicatorMixin):
@@ -1354,33 +1355,53 @@ class TokenizerManager(TokenizerCommunicatorMixin):
             if getattr(recv_obj, "output_hidden_states", None):
                 meta_info["hidden_states"] = recv_obj.output_hidden_states[i]
 
+            def update_and_get_aux_info(state, recv_obj, last_output_offset=0):
+                aux_info = {}
+                if recv_obj.aux_info is not None:
+                    if recv_obj.aux_info[i] is not None:
+                        for k, v in recv_obj.aux_info[i].items():
+                            if state.aux_info is None:
+                                state.aux_info = {}
+                            if k not in state.aux_info:
+                                state.aux_info[k] = v
+                            else:
+                                state.aux_info[k].extend(v)
+                            aux_info[k] = state.aux_info[k][last_output_offset:]
+                return aux_info
+
             if isinstance(recv_obj, BatchStrOutput):
                 state.text += recv_obj.output_strs[i]
                 if state.obj.stream:
                     state.output_ids.extend(recv_obj.output_ids[i])
                     output_token_ids = state.output_ids[state.last_output_offset :]
+                    aux_info = update_and_get_aux_info(state, recv_obj, state.last_output_offset)
                     state.last_output_offset = len(state.output_ids)
                 else:
                     state.output_ids.extend(recv_obj.output_ids[i])
+                    aux_info = update_and_get_aux_info(state, recv_obj)
                     output_token_ids = state.output_ids.copy()
 
                 out_dict = {
                     "text": state.text,
                     "output_ids": output_token_ids,
                     "meta_info": meta_info,
+                    "aux_info": aux_info,
                 }
             elif isinstance(recv_obj, BatchTokenIDOutput):
                 if self.server_args.stream_output and state.obj.stream:
                     state.output_ids.extend(recv_obj.output_ids[i])
                     output_token_ids = state.output_ids[state.last_output_offset :]
+                    aux_info = update_and_get_aux_info(state, recv_obj, state.last_output_offset)
                     state.last_output_offset = len(state.output_ids)
                 else:
                     state.output_ids.extend(recv_obj.output_ids[i])
+                    aux_info = update_and_get_aux_info(state, recv_obj)
                     output_token_ids = state.output_ids.copy()
 
                 out_dict = {
                     "output_ids": output_token_ids,
                     "meta_info": meta_info,
+                    "aux_info": aux_info,
                 }
             elif isinstance(recv_obj, BatchMultimodalOutput):
                 raise NotImplementedError("BatchMultimodalOut not implemented")
