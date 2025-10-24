@@ -35,6 +35,8 @@ def validate_input_length(
                 f"{len(req.origin_input_ids)=}, {max_req_input_len=}."
             )
             req.origin_input_ids = req.origin_input_ids[:max_req_input_len]
+            if req.input_embeds:
+                req.input_embeds = req.input_embeds[:max_req_input_len]
             return None
         else:
             error_msg = (

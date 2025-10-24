@@ -1226,7 +1226,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             # If input_embeds are available, store them
             if req.input_embeds is not None:
                 # If req.input_embeds is already a list, append its content directly
-                input_embeds.extend(req.input_embeds)  # Use extend to avoid nesting
+                input_embeds.extend(req.input_embeds[pre_len:seq_len])  # Use extend to avoid nesting
 
             multimodal_inputs.append(req.multimodal_inputs)
 
