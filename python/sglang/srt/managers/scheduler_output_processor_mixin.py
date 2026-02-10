@@ -105,6 +105,8 @@ class SchedulerOutputProcessorMixin:
                 result.extend_logprob_start_len_per_req,
             )
 
+            if self.enable_overlap:
+                self.tp_worker.model_runner.write_to_request_cache_overlap(batch, next_token_ids, result.output_tensor_dict)
             # Move next_token_ids and logprobs to cpu
             next_token_ids = next_token_ids.tolist()
             if batch.return_logprob:
@@ -369,7 +371,8 @@ class SchedulerOutputProcessorMixin:
             result.next_token_ids,
             result.can_run_cuda_graph,
         )
-
+        if self.enable_overlap:
+            self.tp_worker.model_runner.write_to_request_cache_overlap(batch, next_token_ids, result.output_tensor_dict)
         if batch.spec_algorithm.is_none():
             next_token_ids = next_token_ids.tolist()
             if batch.return_logprob:

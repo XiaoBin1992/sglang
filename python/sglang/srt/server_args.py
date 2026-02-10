@@ -402,6 +402,7 @@ class ServerArgs:
 
     # Data parallelism
     dp_size: int = 1
+    dp_spmd_mode: bool = False
     load_balance_method: str = "auto"
 
     # Multi-node distributed serving
@@ -676,6 +677,9 @@ class ServerArgs:
 
     # For forward hooks
     forward_hooks: Optional[List[dict[str, Any]]] = None
+
+    enable_request_cache: bool = False
+    request_cache_config: str = "{}"
 
     def __post_init__(self):
         """
@@ -3390,6 +3394,11 @@ class ServerArgs:
             help="The data parallelism size.",
         )
         parser.add_argument(
+            "--dp-spmd-mode",
+            action="store_true",
+            help="Whether to use spmd mode for dp.",
+        )
+        parser.add_argument(
             "--load-balance-method",
             type=str,
             default=ServerArgs.load_balance_method,
@@ -4740,6 +4749,18 @@ class ServerArgs:
             help="JSON-formatted forward hook specifications to attach to the model.",
         )
 
+        parser.add_argument(
+            "--enable-request-cache",
+            action="store_true",
+            help="enable_request_cache.",
+        )
+        parser.add_argument(
+            "--request-cache-config",
+            type=str,
+            default=ServerArgs.request_cache_config,
+            help='request_cache_config json format',
+        )
+
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
         args.tp_size = args.tensor_parallel_size
@@ -5332,7 +5353,7 @@ class PortArgs:
             )
         else:
             # DP attention. Use TCP + port to handle both single-node and multi-node.
-            if server_args.nnodes == 1 and server_args.dist_init_addr is None:
+            if server_args.dp_spmd_mode or (server_args.nnodes == 1 and server_args.dist_init_addr is None):
                 dist_init_addr = ("127.0.0.1", server_args.port + ZMQ_TCP_PORT_DELTA)
             elif server_args.dist_init_addr.startswith("["):  # ipv6 address
                 port_num, host = configure_ipv6(server_args.dist_init_addr)

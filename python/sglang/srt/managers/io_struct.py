@@ -1874,6 +1874,21 @@ class LazyDumpTensorsReqOutput(BaseReq):
     success: bool
 
 
+@dataclass
+class EmbeddingLookupReqInput:
+    # The request id
+    rid: str
+    # The input token ids
+    input_ids_list: List[List[int]]
+    aux_info: Dict
+
+@dataclass
+class EmbeddingLookupReqOutput:
+    # The request id
+    rid: str
+    output_dict: Dict[str, Any]
+
+
 def _check_all_req_types():
     """A helper function to check all request types are defined in this file."""
     import inspect

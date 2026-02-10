@@ -778,6 +778,10 @@ class Req:
         self.dllm_block_offset = 0
         self.dllm_config = dllm_config
 
+        self.state_info_dict = {}
+        self.tmp_info_dict = {}
+        self.output_cache_dict = {}
+
     @property
     def seqlen(self) -> int:
         """Get the current sequence length of the request."""

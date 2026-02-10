@@ -133,9 +133,21 @@ class DataParallelController:
         # For DP balance
         self.global_balance_id = 0
 
+        if server_args.dp_size == 1:
+            self.dp_rank_range = range(0,1)
+        else:
+            dp_ranks_per_node = server_args.dp_size // server_args.nnodes
+            self.dp_rank_range = range(
+                dp_ranks_per_node * server_args.node_rank,
+                dp_ranks_per_node * (server_args.node_rank + 1),
+            )
+        
+        self.local_dp_size = len(self.dp_rank_range) if server_args.dp_spmd_mode else server_args.dp_size
+        logger.info(f"{self.local_dp_size=}")
+
         # Init inter-process communication
-        self.context = zmq.Context(1 + server_args.dp_size)
-        if server_args.node_rank == 0:
+        self.context = zmq.Context(1 + self.local_dp_size)
+        if server_args.node_rank == 0 or server_args.dp_spmd_mode:
             self.recv_from_tokenizer = get_zmq_socket(
                 self.context, zmq.PULL, port_args.scheduler_input_ipc_name, False
             )
@@ -151,15 +163,15 @@ class DataParallelController:
         self.dispatching = dispatch_lookup[self.load_balance_method]
 
         # Load balance budget
-        self.dp_budget = DPBudget(server_args.dp_size)
+        self.dp_budget = DPBudget(self.local_dp_size)
 
         # To protect changing env vars to set CUDA_VISIBLE_DEVICES.
         self.env_lock = threading.Lock()
 
         # Launch data parallel workers
         self.scheduler_procs = []
-        self.workers: List[zmq.Socket] = [None] * server_args.dp_size
-        self.status: List[bool] = [True] * server_args.dp_size
+        self.workers: List[zmq.Socket] = [None] * self.local_dp_size
+        self.status: List[bool] = [True] * self.local_dp_size
 
         if server_args.enable_dp_attention:
             self.launch_dp_attention_schedulers(server_args, port_args)
@@ -225,7 +237,7 @@ class DataParallelController:
         threads = []
         sockets = []
         ready_events = []
-        for dp_rank in range(server_args.dp_size):
+        for dp_rank in range(self.local_dp_size):
             tmp_port_args = PortArgs.init_new(server_args)
             tmp_port_args.tokenizer_ipc_name = port_args.tokenizer_ipc_name
             tmp_port_args.detokenizer_ipc_name = port_args.detokenizer_ipc_name
@@ -247,7 +259,7 @@ class DataParallelController:
                 server_args.tp_size * server_args.pp_size * server_args.gpu_id_step
             )
 
-            if server_args.node_rank == 0:
+            if server_args.node_rank == 0 or server_args.dp_spmd_mode:
                 self.workers[dp_rank] = get_zmq_socket(
                     self.context,
                     zmq.PUSH,
@@ -373,11 +385,11 @@ class DataParallelController:
     ):
         # Pre-allocate worker ports on node 0 to avoid conflicts
         worker_ports = []
-        if server_args.node_rank == 0:
-            for dp_rank in range(server_args.dp_size):
+        if server_args.node_rank == 0 or server_args.dp_spmd_mode:
+            for local_dp_rank, dp_rank in enumerate(self.dp_rank_range):
                 port_and_socket = get_zmq_socket(self.context, zmq.PUSH)
                 worker_ports.append(port_and_socket[0])
-                self.workers[dp_rank] = port_and_socket[1]
+                self.workers[local_dp_rank] = port_and_socket[1]
                 logger.debug(f"Assigned port {port_and_socket[0]} to worker {dp_rank}")
 
         broadcasted_ports = self._broadcast_worker_ports(
@@ -574,7 +586,7 @@ def run_data_parallel_controller_process(
                 "max_req_input_len": controller.max_req_input_len,
             }
         )
-        if server_args.node_rank == 0:
+        if server_args.node_rank == 0 or server_args.dp_spmd_mode:
             controller.event_loop()
         for proc in controller.scheduler_procs:
             proc.join()

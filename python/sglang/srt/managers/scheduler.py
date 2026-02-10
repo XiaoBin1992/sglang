@@ -122,6 +122,8 @@ from sglang.srt.managers.io_struct import (
     UpdateWeightsFromDistributedReqInput,
     UpdateWeightsFromIPCReqInput,
     UpdateWeightsFromTensorReqInput,
+    EmbeddingLookupReqInput,
+    EmbeddingLookupReqOutput,
 )
 from sglang.srt.managers.mm_utils import init_mm_embedding_cache
 from sglang.srt.managers.overlap_utils import FutureMap
@@ -1061,6 +1063,7 @@ class Scheduler(
                 (GetLoadsReqInput, self.get_loads),
                 (PauseGenerationReqInput, self.pause_generation),
                 (ContinueGenerationReqInput, self.continue_generation),
+                (EmbeddingLookupReqInput, self.handle_embedding_lookup),
             ]
         )
 
@@ -1424,10 +1427,20 @@ class Scheduler(
                 item.feature = None
             req.multimodal_inputs = None
 
+    def handle_embedding_lookup(
+        self,
+        recv_req: EmbeddingLookupReqInput,
+    ):
+        output_dict = self.tp_worker.model_runner.embedding_lookup(recv_req.rid, recv_req.input_ids_list, recv_req.aux_info)
+        # if self.attn_tp_rank == 0:
+        res = EmbeddingLookupReqOutput(rid=recv_req.rid, output_dict=output_dict)
+        self.send_to_tokenizer.send_pyobj(res)
+
     def handle_generate_request(
         self,
         recv_req: TokenizedGenerateReqInput,
     ):
+        self.tp_worker.model_runner.patch_req_info(recv_req)
         # Create a new request
         if (
             recv_req.session_params is None
@@ -2286,10 +2299,11 @@ class Scheduler(
 
                 bs = len(model_worker_batch.seq_lens)
                 future_indices = self.future_map.alloc_future_indices(bs)
-
+                self.tp_worker.model_runner.read_from_request_cache_overlap(model_worker_batch)
                 with self.forward_stream_ctx:
                     self.forward_stream.wait_stream(self.default_stream)
                     self.future_map.resolve_future(model_worker_batch)
+                    self.tp_worker.model_runner.resolve_future_input_cache(model_worker_batch)
                     with self.record_forward_metrics(batch):
                         batch_result = self.model_worker.forward_batch_generation(
                             model_worker_batch
@@ -2342,7 +2356,8 @@ class Scheduler(
             #       we shall still keep the original outputs, e.g. next_token_ids
             #       in the GenerationBatchOutput for processing after copy_done.
             batch.output_ids = future_indices_or_next_token_ids
-
+            if not self.enable_overlap:
+                self.tp_worker.model_runner.save_output_cache(batch.reqs, batch.output_tensor_dict)
             # These 2 values are needed for processing the output, but the values can be
             # modified by overlap schedule. So we have to copy them here so that
             # we can use the correct values in output processing.

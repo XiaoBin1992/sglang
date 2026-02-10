@@ -421,6 +421,9 @@ class Engine(EngineBase):
         generator = self.tokenizer_manager.generate_request(obj, None)
         return await generator.__anext__()
 
+    async def embedding_lookup(self, rid: str, text_list: List[List[str]] = None, input_ids_list: List[List[int]] = None, aux_info: Dict = None):
+        return await self.tokenizer_manager.embedding_lookup(rid, text_list, input_ids_list, aux_info)
+
     def rerank(
         self,
         prompt: Union[List[List[str]]],
@@ -966,7 +969,7 @@ def _launch_subprocesses(
         run_scheduler_process_func=run_scheduler_process_func,
     )
 
-    if server_args.node_rank >= 1:
+    if server_args.node_rank >= 1 and not server_args.dp_spmd_mode:
         # In multi-node cases, non-zero rank nodes do not need to run tokenizer or detokenizer,
         # so they can just wait here.
 
