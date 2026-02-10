@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ast import Dict
 import dataclasses
 import logging
 from typing import TYPE_CHECKING, List, Optional, Union
@@ -53,6 +54,9 @@ class GenerationBatchResult:
     # metrics
     expert_distribution_metrics: Optional[ExpertDistributionMetrics] = None
 
+    # mm
+    output_tensor_dict: Optional[Dict[str, torch.Tensor]] = None
+
     def copy_to_cpu(self, return_logprob: bool):
         """Copy tensors to CPU in overlap scheduling.
         Only the tensors which are needed for processing results are copied,
@@ -97,6 +101,11 @@ class GenerationBatchResult:
         if (x := self.expert_distribution_metrics) is not None:
             x.copy_to_cpu()
 
+        if self.output_tensor_dict is not None:
+            new_output_tensor_dict = {}
+            for key, value in self.output_tensor_dict.items():
+                new_output_tensor_dict[key] = value.to("cpu", non_blocking=True)
+            self.output_tensor_dict = new_output_tensor_dict
         self.copy_done.record()
 
     @classmethod

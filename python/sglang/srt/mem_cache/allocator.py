@@ -410,6 +410,7 @@ class PagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         seq_lens_cpu: torch.Tensor,
         last_loc: torch.Tensor,
         extend_num_tokens: int,
+        **kwargs,
     ):
         if self.debug_mode:
             assert torch.all(
@@ -455,6 +456,7 @@ class PagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         seq_lens: torch.Tensor,
         seq_lens_cpu: torch.Tensor,
         last_loc: torch.Tensor,
+        **kwargs,
     ):
         if self.debug_mode:
             assert torch.all(
@@ -521,3 +523,167 @@ class PagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         return self._kvcache.load_cpu_copy(
             kv_cache_cpu, indices, mamba_indices=mamba_indices
         )
+
+
+class OmniPagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
+    """
+    An allocator managing token-level KV indices that are owned externally
+    by an OmniFlow ``RequestCache``.
+
+    Page slots are not allocated here — the actor side hands them in via
+    ``req.input_extra_infos["omni_flow"]["slots"]``. This allocator only
+    translates per-token positions into KV indices the engine can consume,
+    requesting more pages on the fly from ``RequestCache`` when a request
+    overruns its current slot list.
+    """
+
+    def __init__(
+        self,
+        size: int,
+        page_size: int,
+        dtype: torch.dtype,
+        device: str,
+        kvcache: KVCache,
+        need_sort: bool,
+        request_cache,
+    ):
+        # Skip BaseTokenToKVPoolAllocator.__init__ side effects (free_pages
+        # etc.) that don't apply to externally-owned slots, but keep the same
+        # public attributes so isinstance / attribute lookups work.
+        self.size = size
+        self.page_size = page_size
+        self.dtype = dtype
+        self.device = device
+        self._kvcache = kvcache
+        self.need_sort = need_sort
+        self.num_pages = size // page_size
+        self.is_not_in_free_group = True
+        self.free_group = []
+        self.request_cache = request_cache
+        # No dummy_output reservation in this path; keep the attribute so the
+        # radix cache slot translation remains a no-op.
+        self.dummy_page_offset = 0
+
+    def debug_print(self) -> str:
+        return f"OmniPagedTokenToKVPoolAllocator(size={self.size}, page_size={self.page_size})"
+
+    def available_size(self):
+        # Slot lifetime is owned by RequestCache; the engine-side allocator
+        # has no notion of "available pages" beyond the static pool size.
+        return self.size
+
+    def get_kvcache(self):
+        return self._kvcache
+
+    def restore_state(self, state):
+        # No-op: we hold no per-page state on the engine side.
+        pass
+
+    def backup_state(self):
+        return None
+
+    def alloc(self, need_size: int):
+        raise NotImplementedError(
+            "OmniPagedTokenToKVPoolAllocator does not support contiguous alloc; "
+            "use alloc_extend / alloc_decode."
+        )
+
+    def _ensure_slots(self, reqs, required_pages):
+        """Top up each request's slot list to ``required_pages`` pages."""
+        need_more = [
+            (req, n_pages)
+            for req, n_pages in zip(reqs, required_pages)
+            if len(req.input_extra_infos["omni_flow"]["slots"]) < n_pages
+        ]
+        if not need_more:
+            return
+        rids = [req.rid for req in need_more]
+        extends = self.request_cache.alloc_global_params_page_for_decode(
+            "kv_cache", rids
+        )
+        for (req, _), extra in zip(need_more, extends):
+            req.input_extra_infos["omni_flow"]["slots"].extend(extra)
+
+    def alloc_extend(
+        self,
+        prefix_lens: torch.Tensor,
+        prefix_lens_cpu: torch.Tensor,
+        seq_lens: torch.Tensor,
+        seq_lens_cpu: torch.Tensor,
+        last_loc: torch.Tensor,
+        extend_num_tokens: int,
+        reqs,
+        **kwargs,
+    ):
+        # Make sure each request has enough page slots for its new tokens.
+        required_pages = [
+            (int(seq_len) + self.page_size - 1) // self.page_size
+            for seq_len in seq_lens_cpu.tolist()
+        ]
+        self._ensure_slots(reqs, required_pages)
+
+        out_indices_cpu = torch.empty((extend_num_tokens,), dtype=torch.int64)
+        offset = 0
+        for req, prefix_len_t, seq_len_t in zip(reqs, prefix_lens_cpu, seq_lens_cpu):
+            prefix_len = int(prefix_len_t)
+            seq_len = int(seq_len_t)
+            extend_len = seq_len - prefix_len
+            if extend_len <= 0:
+                continue
+            slots = req.input_extra_infos["omni_flow"]["slots"]
+            for i in range(extend_len):
+                pos = prefix_len + i
+                page_id = slots[pos // self.page_size]
+                out_indices_cpu[offset + i] = (
+                    page_id * self.page_size + (pos % self.page_size)
+                )
+            offset += extend_len
+
+        return out_indices_cpu.to(self.device, non_blocking=True)
+
+    def alloc_decode(
+        self,
+        seq_lens: torch.Tensor,
+        seq_lens_cpu: torch.Tensor,
+        last_loc: torch.Tensor,
+        reqs,
+        **kwargs,
+    ):
+        # Decode appends one token per request; ensure each has a slot for the
+        # page covering the new token (1-indexed seq_len → token index seq_len-1).
+        required_pages = [
+            (int(seq_len) + self.page_size - 1) // self.page_size
+            for seq_len in seq_lens_cpu.tolist()
+        ]
+        self._ensure_slots(reqs, required_pages)
+
+        bs = len(seq_lens_cpu)
+        out_indices_cpu = torch.empty((bs,), dtype=torch.int64)
+        for i, (req, seq_len_t) in enumerate(zip(reqs, seq_lens_cpu)):
+            seq_len = int(seq_len_t)
+            new_token_pos = seq_len - 1
+            slots = req.input_extra_infos["omni_flow"]["slots"]
+            page_id = slots[new_token_pos // self.page_size]
+            out_indices_cpu[i] = (
+                page_id * self.page_size + (new_token_pos % self.page_size)
+            )
+
+        return out_indices_cpu.to(self.device, non_blocking=True)
+
+    def free(self, free_index: torch.Tensor):
+        # RequestCache owns the page lifetime; nothing to do here.
+        pass
+
+    def free_group_begin(self):
+        self.is_not_in_free_group = False
+        self.free_group = []
+
+    def free_group_end(self):
+        self.is_not_in_free_group = True
+        self.free_group = []
+
+    def clear(self):
+        pass
+
+    def merge_and_sort_free(self):
+        pass

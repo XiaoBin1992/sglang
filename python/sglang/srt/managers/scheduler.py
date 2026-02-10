@@ -144,6 +144,8 @@ from sglang.srt.managers.io_struct import (
     UpdateWeightsFromDistributedReqInput,
     UpdateWeightsFromIPCReqInput,
     UpdateWeightsFromTensorReqInput,
+    EmbeddingLookupReqInput,
+    EmbeddingLookupReqOutput,
 )
 from sglang.srt.managers.mm_utils import (
     has_shm_features,
@@ -186,7 +188,7 @@ from sglang.srt.managers.scheduler_update_weights_mixin import (
 from sglang.srt.managers.utils import GenerationBatchResult, validate_input_length
 from sglang.srt.mem_cache.cache_init_params import CacheInitParams
 from sglang.srt.mem_cache.common import maybe_cache_unfinished_req, release_kv_cache
-from sglang.srt.mem_cache.radix_cache import RadixCache
+from sglang.srt.mem_cache.radix_cache import RadixCache, OmniFlowRadixCache
 from sglang.srt.model_executor.forward_batch_info import ForwardMode, PPProxyTensors
 from sglang.srt.model_loader.utils import get_resolved_model_impl
 from sglang.srt.multiplex.multiplexing_mixin import SchedulerMultiplexMixin
@@ -236,6 +238,7 @@ from sglang.srt.utils.numa_utils import get_numa_node_if_available, numa_bind_to
 from sglang.srt.utils.tensor_bridge import use_mlx
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 from sglang.utils import TypeBasedDispatcher, get_exception_traceback
+from sglang.srt.mem_cache.request_cache import RequestCache
 
 if is_mps():
     CudaStreamContext = nullcontext
@@ -866,7 +869,11 @@ class Scheduler(
             sliding_window_size=self.sliding_window_size,
         )
 
-        if effective_chunked_prefill_size is not None and self.disable_radix_cache:
+        if RequestCache:
+            self.tree_cache = OmniFlowRadixCache(params,
+                request_cache=RequestCache.get_instance(),
+            )
+        elif effective_chunked_prefill_size is not None and self.disable_radix_cache:
             if not self.is_hybrid_swa:
                 from sglang.srt.mem_cache.chunk_cache import ChunkCache
 
@@ -1453,6 +1460,7 @@ class Scheduler(
                     ListExternalCorporaReqInput,
                     self.list_external_corpora,
                 ),
+                (EmbeddingLookupReqInput, self.handle_embedding_lookup),
             ]
         )
 
@@ -1947,10 +1955,20 @@ class Scheduler(
             mm_inputs.release_features()
             req.multimodal_inputs = None
 
+    def handle_embedding_lookup(
+        self,
+        recv_req: EmbeddingLookupReqInput,
+    ):
+        output_dict = self.tp_worker.model_runner.embedding_lookup(recv_req.rid, recv_req.input_ids_list, recv_req.aux_info)
+        # if self.attn_tp_rank == 0:
+        res = EmbeddingLookupReqOutput(rid=recv_req.rid, output_dict=output_dict)
+        self.send_to_tokenizer.send_pyobj(res)
+
     def handle_generate_request(
         self,
         recv_req: TokenizedGenerateReqInput,
     ):
+        self.tp_worker.model_runner.patch_req_info(recv_req)
         # Route: normal request / session request / session-not-found
         session_id = (
             recv_req.session_params.id if recv_req.session_params is not None else None
@@ -1981,6 +1999,7 @@ class Scheduler(
                 input_embeds=recv_req.input_embeds,
                 positional_embed_overrides=recv_req.positional_embed_overrides,
                 token_type_ids=recv_req.token_type_ids,
+                input_extra_infos=recv_req.input_extra_infos,
                 custom_logit_processor=recv_req.custom_logit_processor,
                 require_reasoning=recv_req.require_reasoning,
                 return_hidden_states=recv_req.return_hidden_states,
@@ -2940,10 +2959,11 @@ class Scheduler(
                 )
                 bs = len(model_worker_batch.seq_lens)
                 future_indices = self.future_map.alloc_future_indices(bs)
-
+                self.tp_worker.model_runner.read_from_request_cache_overlap(model_worker_batch)
                 with self.forward_stream_ctx:
                     self.forward_stream.wait_stream(self.schedule_stream)
                     self.future_map.resolve_future(model_worker_batch)
+                    self.tp_worker.model_runner.resolve_future_input_cache(model_worker_batch)
                     batch_result = self.model_worker.forward_batch_generation(
                         model_worker_batch
                         # here pp is not compatible with overlap
@@ -2989,7 +3009,8 @@ class Scheduler(
             #       we shall still keep the original outputs, e.g. next_token_ids
             #       in the GenerationBatchOutput for processing after copy_done.
             batch.output_ids = future_indices_or_next_token_ids
-
+            if not self.enable_overlap:
+                self.tp_worker.model_runner.save_output_cache(batch.reqs, batch_result.output_tensor_dict)
             # These 2 values are needed for processing the output, but the values can be
             # modified by overlap schedule. So we have to copy them here so that
             # we can use the correct values in output processing.

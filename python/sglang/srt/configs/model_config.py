@@ -762,6 +762,15 @@ class ModelConfig:
         # parallel size so each GPU has at least one KV head.
         return max(1, total_num_kv_heads // tensor_parallel_size)
 
+    def get_num_kv_head_ids(self, tensor_parallel_size, tensor_parallel_rank) -> List[int]:
+        heads_per_rank = self.get_num_kv_heads(tensor_parallel_size)
+        return list(
+            range(
+                tensor_parallel_rank * heads_per_rank,
+                (tensor_parallel_rank + 1) * heads_per_rank,
+            )
+        )
+
     def get_swa_num_kv_heads(self, tensor_parallel_size) -> int:
         """Similar to get_num_kv_heads(), but for SWA."""
         if hasattr(self.hf_text_config, "swa_num_key_value_heads"):

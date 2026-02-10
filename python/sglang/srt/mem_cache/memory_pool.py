@@ -69,6 +69,7 @@ if TYPE_CHECKING:
     from sglang.srt.managers.cache_controller import LayerDoneCounter
     from sglang.srt.managers.schedule_batch import Req
 
+from sglang.srt.mem_cache.request_cache import RequestCache
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +193,57 @@ class ReqToTokenPool:
         self.free_slots = list(range(1, self.size + 1))
 
 
+def _alloc_kv_cache(sub_names, layer_ids, page_count, page_size, head_ids, dtype, device, first_n_token_for_dummy_output=None, view_shape=None, sliding_window_size=None, shapes=None, shape=None):
+    # Accept both `shapes` and `shape` to be compatible with legacy callers
+    # that wrote `shape=...`. Whichever is non-None wins.
+    if shapes is None:
+        shapes = shape
+    if isinstance(shapes, int):
+        shapes = (shapes,)
+    if isinstance(sub_names, str):
+        sub_names = [sub_names]
+    if isinstance(layer_ids, int):
+        layer_ids = [layer_ids]
+    
+    from sglang.srt.mem_cache.request_cache import RequestCache
+    if RequestCache and RequestCache.get_instance().enable_request_cache == 2:
+        # reuse=False: kv_cache 不应复用 page_count 不同的旧 tensor，否则 view() 会因元素数不匹配而崩溃。
+        # alloc_global_params 返回 (tensor, actual_page_count)，需根据实际 page_count 重算 view_shape。
+        tensor, actual_page_count = RequestCache.get_instance().alloc_global_params("kv_cache",
+            sub_names, 
+            layer_ids,
+            page_count, 
+            page_size,
+            head_ids,
+            shapes,
+            dtype, 
+            device,
+            first_n_token_for_dummy_output=first_n_token_for_dummy_output,
+            sliding_window_size=sliding_window_size,
+            reuse=False,
+        )
+        # 根据实际分配的 page_count 重新计算 view_shape（每个维度除第 0 维以外保持不变）
+        if view_shape and actual_page_count != page_count:
+            # view_shape[0] 的公式为: actual_page_count * page_size + first_n_token_for_dummy_output
+            actual_first_dim = actual_page_count * page_size + first_n_token_for_dummy_output
+            view_shape = (actual_first_dim, *view_shape[1:])
+    else:
+        actual_page_count = page_count
+        dummy = first_n_token_for_dummy_output or 0
+        tensor = torch.zeros((page_count * page_size + dummy, len(head_ids), *shapes), dtype=dtype, device=device)
+
+    if view_shape:
+        tensor = tensor.view(view_shape)
+
+    return tensor
+
+def _free_kv_cache(tensor_list):
+    from sglang.srt.mem_cache.request_cache import RequestCache
+    if RequestCache and RequestCache.get_instance().enable_request_cache == 2:
+        RequestCache.get_instance().free_global_params("kv_cache", tensor_list)
+    else:
+        del tensor_list
+
 class MambaPool:
     @dataclass(frozen=True, kw_only=True)
     class State:
@@ -255,6 +307,7 @@ class MambaPool:
             if self.enable_custom_mem_pool
             else nullcontext()
         ):
+            # TODO @xiaobin use _alloc_kv_cache
             conv_state = [
                 torch.zeros(
                     size=(num_mamba_layers, size + 1) + conv_shape,
@@ -689,10 +742,15 @@ class KVCache(abc.ABC):
         page_size: int,
         dtype: torch.dtype,
         layer_num: int,
+        head_num: int,
+        head_dim: int,
         device: str,
         enable_memory_saver: bool,
         start_layer: Optional[int] = None,
         end_layer: Optional[int] = None,
+        layer_ids: List[int] = None,
+        head_ids: Tuple[int, int] = None,
+        sliding_window_size: Optional[int] = None,
     ):
         self.size = size
         self.page_size = page_size
@@ -706,6 +764,17 @@ class KVCache(abc.ABC):
         self.layer_num = layer_num
         self.start_layer = start_layer or 0
         self.end_layer = end_layer or layer_num - 1
+        
+        if layer_ids is None:
+            layer_ids = list(range(0, layer_num))
+        self.layer_ids = layer_ids
+        self.head_num = head_num
+        if head_ids is None:
+            head_ids = list(range(0, head_num))
+        self.head_ids = head_ids
+        self.head_dim = head_dim
+        self.sliding_window_size = sliding_window_size
+
         self.memory_saver_adapter = TorchMemorySaverAdapter.create(
             enable=enable_memory_saver
         )
@@ -797,16 +866,24 @@ class MHATokenToKVPool(KVCache):
         end_layer: Optional[int] = None,
         enable_alt_stream: bool = True,
         enable_kv_cache_copy: bool = False,
+        layer_ids: List[int] = None,
+        head_ids: Tuple[int, int] = None,
+        sliding_window_size: Optional[int] = None,
     ):
         super().__init__(
             size,
             page_size,
             dtype,
             layer_num,
+            head_num,
+            head_dim,
             device,
             enable_memory_saver,
             start_layer,
             end_layer,
+            layer_ids=layer_ids,
+            head_ids=head_ids,
+            sliding_window_size=sliding_window_size,
         )
         self.head_num = swa_head_num if swa_head_num is not None else head_num
         self.head_dim = swa_head_dim if swa_head_dim is not None else head_dim
@@ -895,20 +972,34 @@ class MHATokenToKVPool(KVCache):
                 # [size, head_num, head_dim] for each layer
                 # The padded slot 0 is used for writing dummy outputs from padded tokens.
                 self.k_buffer = [
-                    torch.zeros(
-                        (self.size + self.page_size, self.head_num, self.head_dim),
+                    _alloc_kv_cache(
+                        sub_names="k_buffer",
+                        layer_ids=self.layer_ids[layer_idx],
+                        page_count=self.size//self.page_size,
+                        page_size=self.page_size,
+                        head_ids=self.head_ids,
+                        shape=(self.head_dim),
                         dtype=self.store_dtype,
                         device=self.device,
+                        first_n_token_for_dummy_output=self.page_size,
+                        view_shape=(self.size + self.page_size, self.head_num, self.head_dim),
                     )
-                    for _ in range(self.layer_num)
+                    for layer_idx in range(self.layer_num)
                 ]
                 self.v_buffer = [
-                    torch.zeros(
-                        (self.size + self.page_size, self.head_num, self.v_head_dim),
+                    _alloc_kv_cache(
+                        sub_names="v_buffer",
+                        layer_ids=self.layer_ids[layer_idx],
+                        page_count=self.size//self.page_size,
+                        page_size=self.page_size,
+                        head_ids=self.head_ids,
+                        shape=(self.head_dim),
                         dtype=self.store_dtype,
                         device=self.device,
+                        first_n_token_for_dummy_output=self.page_size,
+                        view_shape=(self.size + self.page_size, self.head_num, self.head_dim),
                     )
-                    for _ in range(self.layer_num)
+                    for layer_idx in range(self.layer_num)
                 ]
 
         self.k_data_ptrs = torch.tensor(
@@ -931,8 +1022,8 @@ class MHATokenToKVPool(KVCache):
         )
 
     def _clear_buffers(self):
-        del self.k_buffer
-        del self.v_buffer
+        _free_kv_cache(self.k_buffer)
+        _free_kv_cache(self.v_buffer)
 
     def get_kv_size_bytes(self):
         assert hasattr(self, "k_buffer")
@@ -1142,44 +1233,81 @@ class MHATokenToKVPoolFP4(MHATokenToKVPool):
                 scale_block_size = 16
                 self.store_dtype = torch.uint8
                 self.k_buffer = [
-                    torch.zeros(
-                        (m, n, k // 2),
+                    _alloc_kv_cache(
+                        sub_names="k_buffer",
+                        layer_ids=self.layer_ids[layer_idx],
+                        page_count=self.size//self.page_size,
+                        page_size=self.page_size,
+                        head_ids=self.head_ids,
+                        shape=(k // 2),
                         dtype=self.store_dtype,
                         device=self.device,
+                        first_n_token_for_dummy_output=self.page_size,
+                        view_shape=(m, n, k // 2),
                     )
-                    for _ in range(self.layer_num)
+                    for layer_idx in range(self.layer_num)
                 ]
                 self.v_buffer = [
-                    torch.zeros(
-                        (m, n, k // 2),
+                    _alloc_kv_cache(
+                        sub_names="v_buffer",
+                        layer_ids=self.layer_ids[layer_idx],
+                        page_count=self.size//self.page_size,
+                        page_size=self.page_size,
+                        head_ids=self.head_ids,
+                        shape=(k // 2),
                         dtype=self.store_dtype,
                         device=self.device,
+                        first_n_token_for_dummy_output=self.page_size,
+                        view_shape=(m, n, k // 2),
                     )
-                    for _ in range(self.layer_num)
+                    for layer_idx in range(self.layer_num)
                 ]
 
+                # self.k_scale_buffer = [
+                #     torch.zeros(
+                #         (m, (n * k) // scale_block_size),
+                #         dtype=self.store_dtype,
+                #         device=self.device,
+                #     )
+                #     for _ in range(self.layer_num)
+                # ]
+                assert k % scale_block_size == 0
                 self.k_scale_buffer = [
-                    torch.zeros(
-                        (m, (n * k) // scale_block_size),
+                    _alloc_kv_cache(
+                        sub_names="k_scale_buffer",
+                        layer_ids=self.layer_ids[layer_idx],
+                        page_count=self.size//self.page_size,
+                        page_size=self.page_size,
+                        head_ids=self.head_ids,
+                        shape=(k // scale_block_size),
                         dtype=self.store_dtype,
                         device=self.device,
+                        first_n_token_for_dummy_output=self.page_size,
+                        view_shape=(m, (n * k) // scale_block_size),
                     )
-                    for _ in range(self.layer_num)
+                    for layer_idx in range(self.layer_num)
                 ]
                 self.v_scale_buffer = [
-                    torch.zeros(
-                        (m, (n * k) // scale_block_size),
+                    _alloc_kv_cache(
+                        sub_names="v_scale_buffer",
+                        layer_ids=self.layer_ids[layer_idx],
+                        page_count=self.size//self.page_size,
+                        page_size=self.page_size,
+                        head_ids=self.head_ids,
+                        shape=(k // scale_block_size),
                         dtype=self.store_dtype,
                         device=self.device,
+                        first_n_token_for_dummy_output=self.page_size,
+                        view_shape=(m, (n * k) // scale_block_size),
                     )
-                    for _ in range(self.layer_num)
+                    for layer_idx in range(self.layer_num)
                 ]
 
     def _clear_buffers(self):
-        del self.k_buffer
-        del self.v_buffer
-        del self.k_scale_buffer
-        del self.v_scale_buffer
+        _free_kv_cache(self.k_buffer)
+        _free_kv_cache(self.v_buffer)
+        _free_kv_cache(self.k_scale_buffer)
+        _free_kv_cache(self.v_scale_buffer)
 
     def _get_key_buffer(self, layer_id: int):
         # for internal use of referencing
@@ -1287,6 +1415,7 @@ class HybridLinearKVPool(KVCache):
         kv_lora_rank: int = None,
         qk_rope_head_dim: int = None,
         start_layer: Optional[int] = None,
+        head_ids: Tuple[int, int] = None,
     ):
         self.size = size
         self.dtype = dtype
@@ -1323,6 +1452,8 @@ class HybridLinearKVPool(KVCache):
                 layer_num=self.full_layer_nums,
                 device=device,
                 enable_memory_saver=enable_memory_saver,
+                layer_ids=full_attention_layer_ids,
+                head_ids=head_ids,
             )
         else:
 
@@ -1346,6 +1477,7 @@ class HybridLinearKVPool(KVCache):
                 kv_lora_rank=kv_lora_rank,
                 qk_rope_head_dim=qk_rope_head_dim,
                 enable_memory_saver=enable_memory_saver,
+                layer_ids=full_attention_layer_ids,
             )
         self.full_attention_layer_id_mapping = {
             id: i for i, id in enumerate(full_attention_layer_ids)
@@ -1511,18 +1643,9 @@ class MLATokenToKVPool(KVCache):
         end_layer: Optional[int] = None,
         use_nsa: bool = False,
         override_kv_cache_dim: Optional[int] = None,
+        layer_ids: List[int] = None,
+        sliding_window_size: Optional[int] = None,
     ):
-        super().__init__(
-            size,
-            page_size,
-            dtype,
-            layer_num,
-            device,
-            enable_memory_saver,
-            start_layer,
-            end_layer,
-        )
-
         self.kv_lora_rank = kv_lora_rank
         self.qk_rope_head_dim = qk_rope_head_dim
         self.use_nsa = use_nsa
@@ -1538,6 +1661,21 @@ class MLATokenToKVPool(KVCache):
             if self.nsa_kv_cache_store_fp8
             else (kv_lora_rank + qk_rope_head_dim)
         )
+        super().__init__(
+            size,
+            page_size,
+            dtype,
+            layer_num,
+            1,
+            self.kv_cache_dim,
+            device,
+            enable_memory_saver,
+            start_layer,
+            end_layer,
+            layer_ids=layer_ids,
+            sliding_window_size=sliding_window_size,
+        )
+
 
         self._create_buffers()
 
@@ -1559,16 +1697,23 @@ class MLATokenToKVPool(KVCache):
             ):
                 # The padded slot 0 is used for writing dummy outputs from padded tokens.
                 self.kv_buffer = [
-                    torch.zeros(
-                        (self.size + self.page_size, 1, self.kv_cache_dim),
+                    _alloc_kv_cache(
+                        sub_names="kv_buffer",
+                        layer_ids=self.layer_ids[layer_idx],
+                        page_count=self.size//self.page_size,
+                        page_size=self.page_size,
+                        head_ids=self.head_ids,
+                        shapes=(self.kv_cache_dim,),
                         dtype=self.store_dtype,
                         device=self.device,
+                        first_n_token_for_dummy_output=self.page_size,
+                        view_shape=(self.size + self.page_size, 1, self.kv_cache_dim),
                     )
-                    for _ in range(self.layer_num)
+                    for layer_idx in range(self.layer_num)
                 ]
 
     def _clear_buffers(self):
-        del self.kv_buffer
+        _free_kv_cache(self.kv_buffer)
 
     def get_kv_size_bytes(self):
         assert hasattr(self, "kv_buffer")
@@ -1748,26 +1893,40 @@ class MLATokenToKVPoolFP4(MLATokenToKVPool):
                 self.store_dtype = torch.uint8
 
                 self.kv_buffer = [
-                    torch.zeros(
-                        (m, n, k // 2),
+                    _alloc_kv_cache(
+                        sub_names="kv_buffer",
+                        layer_ids=self.layer_ids[layer_idx],
+                        page_count=self.size//self.page_size,
+                        page_size=self.page_size,
+                        head_ids=self.head_ids,
+                        shape=(k // 2),
                         dtype=self.store_dtype,
                         device=self.device,
+                        first_n_token_for_dummy_output=self.page_size,
+                        view_shape=(m, n, k // 2),
                     )
-                    for _ in range(self.layer_num)
+                    for layer_idx in range(self.layer_num)
                 ]
 
                 self.kv_scale_buffer = [
-                    torch.zeros(
-                        (m, k // scale_block_size),
+                    _alloc_kv_cache(
+                        sub_names="kv_buffer",
+                        layer_ids=self.layer_ids[layer_idx],
+                        page_count=self.size//self.page_size,
+                        page_size=self.page_size,
+                        head_ids=self.head_ids,
+                        shape=(k // scale_block_size),
                         dtype=self.store_dtype,
                         device=self.device,
+                        first_n_token_for_dummy_output=self.page_size,
+                        view_shape=(m, k // scale_block_size),
                     )
-                    for _ in range(self.layer_num)
+                    for layer_idx in range(self.layer_num)
                 ]
 
     def _clear_buffers(self):
-        del self.kv_buffer
-        del self.kv_scale_buffer
+        _free_kv_cache(self.kv_buffer)
+        _free_kv_cache(self.kv_scale_buffer)
 
     def get_key_buffer(self, layer_id: int):
         if self.layer_transfer_counter is not None:
@@ -1879,6 +2038,7 @@ class NSATokenToKVPool(MLATokenToKVPool):
         start_layer: Optional[int] = None,
         end_layer: Optional[int] = None,
         index_buf_size: Optional[int] = None,
+        layer_ids: Optional[List[int]] = None,
     ):
 
         override_dim = (
@@ -1898,6 +2058,7 @@ class NSATokenToKVPool(MLATokenToKVPool):
             end_layer,
             use_nsa=True,
             override_kv_cache_dim=override_dim,
+            layer_ids=layer_ids,
         )
         # self.index_k_dtype = torch.float8_e4m3fn
         # self.index_k_scale_dtype = torch.float32
@@ -1916,25 +2077,27 @@ class NSATokenToKVPool(MLATokenToKVPool):
             if self.custom_mem_pool
             else nullcontext()
         ):
+            index_page_count = (index_buf_size + page_size + 1) // self.page_size
             self.index_k_with_scale_buffer = [
-                torch.zeros(
-                    # Layout:
-                    #     ref: test_attention.py :: kv_cache_cast_to_fp8
-                    #     shape: (num_pages, page_size 64 * head_dim 128 + page_size 64 * fp32_nbytes 4)
-                    #     data: for page i,
-                    #         * buf[i, :page_size * head_dim] for fp8 data
-                    #         * buf[i, page_size * head_dim:].view(float32) for scale
-                    (
-                        (index_buf_size + page_size + 1) // self.page_size,
+                _alloc_kv_cache(
+                    sub_names="index_k_with_scale_buffer",
+                    layer_ids=self.layer_ids[layer_idx],
+                    page_count=index_page_count,
+                    page_size=self.page_size,
+                    head_ids=self.head_ids,
+                    shape=(index_head_dim + index_head_dim // self.quant_block_size * 4),
+                    dtype=self.store_dtype,
+                    device=self.device,
+                    first_n_token_for_dummy_output=self.page_size,
+                    view_shape=(
+                        index_page_count,
                         self.page_size
                         * (
                             index_head_dim + index_head_dim // self.quant_block_size * 4
                         ),
                     ),
-                    dtype=self.index_k_with_scale_buffer_dtype,
-                    device=device,
                 )
-                for _ in range(layer_num)
+                for layer_idx in range(layer_num)
             ]
         self._finalize_allocation_log(size)
 

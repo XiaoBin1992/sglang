@@ -589,6 +589,7 @@ class Req(ReqDllmMixin):
         lora_id: Optional[str] = None,
         input_embeds: Optional[List[List[float]]] = None,
         positional_embed_overrides: Optional[PositionalEmbeds] = None,
+        input_extra_infos: Optional[Dict] = None,
         token_type_ids: List[int] = None,
         session: Optional[Session] = None,
         custom_logit_processor: Optional[str] = None,
@@ -632,6 +633,7 @@ class Req(ReqDllmMixin):
         self.input_embeds = input_embeds
         self.positional_embed_overrides = positional_embed_overrides
         self.multi_item_delimiter_indices = multi_item_delimiter_indices
+        self.input_extra_infos = input_extra_infos
 
         # For req-level memory management
         self.kv_committed_len = 0
@@ -899,6 +901,10 @@ class Req(ReqDllmMixin):
 
         # For hisparse
         self.hisparse_staging = False
+
+        self.state_info_dict = {}
+        self.tmp_info_dict = {}
+        self.output_cache_dict = {}
 
     @property
     def seqlen(self) -> int:
@@ -1381,6 +1387,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     replace_embeds: Optional[torch.Tensor] = None
     replace_positions: Optional[torch.Tensor] = None
     ne_token_table: torch.Tensor = None
+    input_extra_infos: Optional[Dict] = None
     token_type_ids: torch.Tensor = None  # shape: [b], int64
     req_pool_indices: torch.Tensor = None  # shape: [b], int64
     seq_lens: torch.Tensor = None  # shape: [b], int64
@@ -2119,6 +2126,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         return total
 
     def check_decode_mem(self, selected_indices: Optional[List[int]] = None):
+        server_args = get_global_server_args()
+        # TODO @xiaobin retract
+        if server_args.enable_request_cache:
+            return True
         num_tokens = self.new_tokens_required_next_decode(selected_indices)
         evict_from_tree_cache(self.tree_cache, num_tokens)
         return self.token_to_kv_pool_allocator.available_size() >= num_tokens

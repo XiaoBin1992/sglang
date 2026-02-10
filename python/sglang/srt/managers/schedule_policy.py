@@ -88,11 +88,15 @@ def match_prefix_for_req(
     if token_ids is None:
         token_ids = req.origin_input_ids + req.output_ids
 
+    # OmniFlow caches derive their prefix from per-request metadata, so the
+    # req object must be threaded through unconditionally.
+    needs_req = include_req or getattr(tree_cache, "requires_req", False)
+
     match_result = tree_cache.match_prefix(
         MatchPrefixParams(
             key=RadixKey(token_ids=token_ids, extra_key=req.extra_key),
             cow_mamba=cow_mamba,
-            req=req if include_req else None,
+            req=req if needs_req else None,
         )
     )
     (

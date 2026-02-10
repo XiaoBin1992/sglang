@@ -778,6 +778,8 @@ class ServerArgs:
 
     # For msProbe
     msprobe_dump_config: Optional[str] = None
+    enable_request_cache: bool = False
+    request_cache_config: str = "{}"
 
     def __post_init__(self):
         """
@@ -5121,6 +5123,11 @@ class ServerArgs:
             help="The data parallelism size.",
         )
         parser.add_argument(
+            "--dp-spmd-mode",
+            action="store_true",
+            help="Whether to use spmd mode for dp.",
+        )
+        parser.add_argument(
             "--load-balance-method",
             type=str,
             default=ServerArgs.load_balance_method,
@@ -6670,6 +6677,15 @@ class ServerArgs:
             type=str,
             default=ServerArgs.msprobe_dump_config,
             help="The path of the JSON configuration file for msProbe. If specified, enables msProbe dump.",
+            "--enable-request-cache",
+            action="store_true",
+            help="enable_request_cache.",
+        )
+        parser.add_argument(
+            "--request-cache-config",
+            type=str,
+            default=ServerArgs.request_cache_config,
+            help='request_cache_config json format',
         )
 
     @classmethod
