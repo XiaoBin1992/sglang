@@ -68,6 +68,8 @@ from sglang.srt.managers.io_struct import (
     UpdateWeightFromDiskReqInput,
     UpdateWeightFromDiskReqOutput,
     WatchLoadUpdateReq,
+    EmbeddingLookupReqInput,
+    EmbeddingLookupReqOutput,
 )
 from sglang.srt.managers.mm_utils import TensorTransportMode, wrap_shm_features
 from sglang.srt.managers.multimodal_processor import get_mm_processor, import_processors
@@ -468,6 +470,10 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerScoreMixin):
                 # For handling case when scheduler skips detokenizer and forwards back to the tokenizer manager, we ignore it.
                 (HealthCheckOutput, lambda x: None),
                 (ActiveRanksOutput, self.update_active_ranks),
+                (
+                    EmbeddingLookupReqOutput,
+                    self.embedding_lookup,
+                ),
             ]
         )
         self.init_communicators(self.server_args)
@@ -969,6 +975,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerScoreMixin):
                 bootstrap_room=obj.bootstrap_room,
                 lora_id=obj.lora_id,
                 input_embeds=input_embeds,
+                input_extra_infos=obj.input_extra_infos,
                 session_params=session_params,
                 custom_logit_processor=obj.custom_logit_processor,
                 require_reasoning=obj.require_reasoning,
@@ -1399,6 +1406,28 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerScoreMixin):
             self.is_pause = False
             await self.send_to_scheduler.send_pyobj(obj)
             self.is_pause_cond.notify_all()
+
+
+    async def embedding_lookup(self, rid: str, text_list: List[List[str]] = None, input_ids_list: List[List[int]] = None, aux_info: Dict = None):
+        self.auto_create_handle_loop()
+        if text_list is not None:
+            if self.tokenizer is None:
+                raise ValueError(
+                    "The engine initialized with skip_tokenizer_init=True cannot "
+                    "accept text prompts. Please provide input_ids or re-initialize "
+                    "the engine with skip_tokenizer_init=False."
+                )
+            if input_ids_list is None:
+                input_ids_list = []
+            for input_text in text_list:
+                input_ids = self.tokenizer.encode(input_text)
+                input_ids_list.append(input_ids)
+        get_emb_req = EmbeddingLookupReqInput(rid=rid, input_ids_list=input_ids_list, aux_info=aux_info)
+        try:
+            res: List[EmbeddingLookupReqOutput] = await self.embedding_lookup_communicator(get_emb_req)
+            return res[0].output_dict
+        except:
+            raise RuntimeError(traceback.format_exc())
 
     async def update_weights_from_disk(
         self,

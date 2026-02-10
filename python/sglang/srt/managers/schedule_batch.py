@@ -571,6 +571,7 @@ class Req(ReqDllmMixin):
         origin_input_ids_unpadded: Optional[Tuple[int]] = None,
         lora_id: Optional[str] = None,
         input_embeds: Optional[List[List[float]]] = None,
+        input_extra_infos: Optional[Dict] = None,
         token_type_ids: List[int] = None,
         session: Optional[Session] = None,
         custom_logit_processor: Optional[str] = None,
@@ -610,6 +611,7 @@ class Req(ReqDllmMixin):
         self.fill_ids = []
         self.session = session
         self.input_embeds = input_embeds
+        self.input_extra_infos = input_extra_infos
 
         # For req-level memory management
         self.kv_committed_len = 0
@@ -874,6 +876,10 @@ class Req(ReqDllmMixin):
 
         # For hisparse
         self.hisparse_staging = False
+
+        self.state_info_dict = {}
+        self.tmp_info_dict = {}
+        self.output_cache_dict = {}
 
     @property
     def seqlen(self) -> int:
@@ -1333,6 +1339,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     input_ids: torch.Tensor = None  # shape: [b], int64
     input_embeds: torch.Tensor = None  # shape: [b, hidden_size], float32
     ne_token_table: torch.Tensor = None
+    input_extra_infos: Optional[Dict] = None
     token_type_ids: torch.Tensor = None  # shape: [b], int64
     req_pool_indices: torch.Tensor = None  # shape: [b], int64
     seq_lens: torch.Tensor = None  # shape: [b], int64
@@ -1935,6 +1942,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         return num_tokens * (1 + self.is_spec_v2)
 
     def check_decode_mem(self, selected_indices: Optional[List[int]] = None):
+        server_args = get_global_server_args()
+        # TODO @xiaobin retract
+        if server_args.enable_request_cache:
+            return True
         num_tokens = self.new_tokens_required_next_decode(selected_indices)
         evict_from_tree_cache(self.tree_cache, num_tokens)
         return self.token_to_kv_pool_allocator.available_size() >= num_tokens

@@ -489,7 +489,7 @@ class TpModelWorker(BaseTpWorker):
             ):
 
                 def sample_batch_func():
-                    batch_result.next_token_ids = self.model_runner.sample(
+                    batch_result.next_token_ids, batch_result.output_tensor_dict = self.model_runner.sample(
                         logits_output, forward_batch
                     )
                     return batch_result
@@ -499,7 +499,7 @@ class TpModelWorker(BaseTpWorker):
 
             if not model_worker_batch.is_prefill_only:
                 # For normal requests, sample the next token ids.
-                batch_result.next_token_ids = self.model_runner.sample(
+                batch_result.next_token_ids, batch_result.output_tensor_dict = self.model_runner.sample(
                     logits_output, forward_batch
                 )
             else:
@@ -547,13 +547,14 @@ class TpModelWorker(BaseTpWorker):
         )
         logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
         if logits_output:
-            next_token_ids = self.model_runner.sample(logits_output, model_worker_batch)
+            next_token_ids, output_tensor_dict = self.model_runner.sample(logits_output, model_worker_batch)
         else:
-            next_token_ids = None
+            next_token_ids, output_tensor_dict = None, None
         batch_result = GenerationBatchResult(
             logits_output=logits_output,
             can_run_cuda_graph=can_run_cuda_graph,
             expert_distribution_metrics=out.expert_distribution_metrics,
         )
         batch_result.next_token_ids = next_token_ids
+        batch_result.output_tensor_dict = output_tensor_dict
         return batch_result

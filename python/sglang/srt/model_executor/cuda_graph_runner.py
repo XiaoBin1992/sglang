@@ -976,7 +976,10 @@ class CudaGraphRunner:
 
         if lora_ids is not None:
             self.model_runner.lora_manager.prepare_lora_batch(forward_batch)
-
+        self.model_runner.cuda_graph_capture_one_batch(
+            forward_batch,
+            [self.num_tokens_per_bs] * bs,
+        )
         # Attention backend
         attn_backend.init_forward_metadata_capture_cuda_graph(
             bs,
@@ -1119,6 +1122,15 @@ class CudaGraphRunner:
             attn_backend = self.model_runner.decode_attn_backend_group[stream_idx]
         else:
             attn_backend = self.model_runner.attn_backend
+
+        self.model_runner.cuda_graph_replay(
+            forward_batch,
+            bs,
+            raw_bs, 
+            [seq_len - self.num_tokens_per_bs for seq_len in seq_lens_cpu[:raw_bs].tolist()] + [0] * (bs - raw_bs), 
+            [self.num_tokens_per_bs] * raw_bs + [1] * (bs - raw_bs), 
+            forward_batch.reqs + [None] * (bs - raw_bs),
+        )
         attn_backend.init_forward_metadata_replay_cuda_graph(
             bs,
             buffers.req_pool_indices[:bs],

@@ -905,6 +905,139 @@ class RadixCache(BasePrefixCache):
         return events
 
 
+
+class OmniFlowRadixCache(BasePrefixCache):
+    """OmniFlow prefix cache.
+
+    The KV cache slots are owned by the external request cache (RequestCache);
+    this class only translates between sglang's prefix-cache API and the
+    request-cache notifications, and reports per-request prefix hits derived
+    from ``req.input_extra_infos["omni_flow"]``.
+    """
+
+    # Tells callers (e.g. ``match_prefix_for_req``) that this cache needs
+    # the originating Req in MatchPrefixParams to compute a prefix hit.
+    requires_req = True
+
+    def __init__(self, params: CacheInitParams, request_cache):
+        self.disable = params.disable
+        self.req_to_token_pool = params.req_to_token_pool
+        self.token_to_kv_pool_allocator = params.token_to_kv_pool_allocator
+        self.page_size = params.page_size
+        self.is_eagle = params.is_eagle
+        self.enable_kv_cache_events = params.enable_kv_cache_events
+        self.kv_event_queue = []
+
+        if self.token_to_kv_pool_allocator:
+            self.device = self.token_to_kv_pool_allocator.device
+        else:
+            self.device = torch.device("cpu")
+
+        self.request_cache = request_cache
+
+        if params.enable_metrics:
+            self.init_metrics_collector()
+
+    ##### Public API #####
+
+    def reset(self):
+        pass
+
+    def match_prefix(self, params: MatchPrefixParams) -> MatchResult:
+        # BUG-24 FIX: honor unpadded prefix (prefix_len not a multiple of page_size).
+        #
+        # Backend passes a per-page slot list via ``slots`` and the number of
+        # already-cached tokens via ``prefix_len``. We must cover up to the
+        # residual page so engine does not re-prefill those tokens.
+        # SGLang requires at least one anchor token for prefill, so cap the
+        # cached length to ``len(key)``.
+        req = params.req
+        key = params.key
+
+        if req is None or self.disable or len(key) == 0:
+            return MatchResult(
+                device_indices=torch.empty((0,), dtype=torch.int64, device=self.device),
+                last_device_node=None,
+                last_host_node=None,
+            )
+
+        omni_info = req.input_extra_infos["omni_flow"]
+        slots = omni_info["slots"]
+        prefix_tokens = omni_info["prefix_len"]
+        slots_t = torch.tensor(slots, dtype=torch.int64, device=self.device)
+
+        cached_tokens = min(prefix_tokens, len(key))
+        cached_slot_count = (cached_tokens + self.page_size - 1) // self.page_size
+        cached_slot_count = min(cached_slot_count, slots_t.numel())
+        prefix_pages = slots_t[:cached_slot_count]
+
+        # BUG-27 FIX: keep slot id translation aligned with the allocator.
+        dummy_page_offset = getattr(
+            self.token_to_kv_pool_allocator, "dummy_page_offset", 0
+        )
+        if dummy_page_offset:
+            prefix_pages = prefix_pages + dummy_page_offset
+
+        # Expand per-page slots into per-token kv indices (length cached_tokens).
+        if cached_slot_count > 0:
+            offsets = torch.arange(self.page_size, dtype=torch.int64, device=self.device)
+            value = (prefix_pages.unsqueeze(1) * self.page_size + offsets).reshape(-1)[
+                :cached_tokens
+            ]
+        else:
+            value = torch.empty((0,), dtype=torch.int64, device=self.device)
+
+        return MatchResult(
+            device_indices=value,
+            last_device_node=None,
+            last_host_node=None,
+            cache_protected_len=cached_tokens,
+        )
+
+    def cache_finished_req(self, req: Req, is_insert: bool = True, **kwargs):
+        """Cache request when it finishes."""
+        kv_committed_len = req.pop_committed_kv_cache()
+        self.request_cache.publish_finished_req(req, kv_committed_len)
+
+        # Remove req slot, release the cache lock.
+        self.req_to_token_pool.free(req.req_pool_idx)
+
+    def cache_unfinished_req(self, req: Req, chunked: bool = False, **kwargs):
+        """Cache request when it is unfinished."""
+        finish_len = len(req.fill_ids)
+        req.cache_protected_len = finish_len
+        self.request_cache.publish_unfinished_req(req, finish_len)
+
+    def evict(self, params: EvictParams) -> EvictResult:
+        return EvictResult()
+
+    def inc_lock_ref(self, node: Any) -> IncLockRefResult:
+        return IncLockRefResult()
+
+    def dec_lock_ref(
+        self, node: Any, params: Optional[DecLockRefParams] = None
+    ) -> DecLockRefResult:
+        return DecLockRefResult()
+
+    def evictable_size(self):
+        return 0
+
+    def protected_size(self):
+        return 0
+
+    def total_size(self):
+        return 0
+
+    def pretty_print(self):
+        print(f"OmniFlowRadixCache(#tokens={self.total_size()})")
+
+    def take_events(self):
+        if not self.enable_kv_cache_events:
+            return []
+        events = self.kv_event_queue
+        self.kv_event_queue = []
+        return events
+
 if __name__ == "__main__":
     tree = RadixCache.create_simulated()
 

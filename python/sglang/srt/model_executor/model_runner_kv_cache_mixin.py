@@ -9,8 +9,9 @@ import torch
 from sglang.srt.configs.model_config import get_nsa_index_head_dim, is_deepseek_nsa
 from sglang.srt.distributed.parallel_state import get_world_group
 from sglang.srt.environ import envs
-from sglang.srt.layers.dp_attention import get_attention_tp_size
+from sglang.srt.layers.dp_attention import get_attention_tp_rank, get_attention_tp_size
 from sglang.srt.mem_cache.allocator import (
+    OmniPagedTokenToKVPoolAllocator,
     PagedTokenToKVPoolAllocator,
     TokenToKVPoolAllocator,
 )
@@ -59,6 +60,8 @@ class MemoryPoolConfig:
                 msg += f" Current value: mem_fraction_static={self.mem_fraction_static}"
             raise RuntimeError(msg)
 
+
+from sglang.srt.mem_cache.request_cache import RequestCache
 
 # the ratio of mamba cache pool size to max_running_requests
 MAMBA_CACHE_SIZE_MAX_RUNNING_REQUESTS_RATIO = 3
@@ -541,6 +544,9 @@ class ModelRunnerKVCacheMixin:
                     head_num=self.model_config.get_num_kv_heads(
                         get_attention_tp_size()
                     ),
+                    head_ids=self.model_config.get_num_kv_head_ids(
+                        get_attention_tp_size(), get_attention_tp_rank()
+                    ),
                     head_dim=self.model_config.head_dim,
                     layer_num=self.num_effective_layers,
                     device=self.device,
@@ -619,12 +625,15 @@ class ModelRunnerKVCacheMixin:
             if self.is_hybrid_swa:
                 kwargs = {}
                 if self.is_hybrid_swa_compress:
+                    swa_head_num = max(
+                        1,
+                        self.model_config.hf_text_config.swa_num_key_value_heads
+                        // get_attention_tp_size(),
+                    )
+                    swa_heads_range = (get_attention_tp_rank() * swa_head_num , get_attention_tp_rank() * swa_head_num + 1)
                     kwargs = {
-                        "swa_head_num": max(
-                            1,
-                            self.model_config.hf_text_config.swa_num_key_value_heads
-                            // get_attention_tp_size(),
-                        ),
+                        "swa_head_num": swa_head_num,
+                        "swa_heads_range": swa_heads_range,
                         "swa_head_dim": self.model_config.hf_text_config.swa_head_dim,
                         "swa_v_head_dim": self.model_config.hf_text_config.swa_v_head_dim,
                         "v_head_dim": self.model_config.hf_text_config.v_head_dim,
@@ -637,11 +646,15 @@ class ModelRunnerKVCacheMixin:
                     head_num=self.model_config.get_num_kv_heads(
                         get_attention_tp_size()
                     ),
+                    head_ids=self.model_config.get_num_kv_head_ids(
+                        get_attention_tp_size(), get_attention_tp_rank()
+                    ),
                     head_dim=self.model_config.head_dim,
                     swa_attention_layer_ids=self.model_config.swa_attention_layer_ids,
                     full_attention_layer_ids=self.model_config.full_attention_layer_ids,
                     enable_kvcache_transpose=False,
                     device=self.device,
+                    sliding_window_size=self.model_config.sliding_window_size,
                     **kwargs,
                 )
             elif config := self.mambaish_config:
@@ -657,6 +670,9 @@ class ModelRunnerKVCacheMixin:
                     dtype=self.kv_cache_dtype,
                     head_num=self.model_config.get_num_kv_heads(
                         get_attention_tp_size()
+                    ),
+                    head_ids=self.model_config.get_num_kv_head_ids(
+                        get_attention_tp_size(), get_attention_tp_rank()
                     ),
                     head_dim=self.model_config.head_dim,
                     # if draft worker, we only need 1 attention layer's kv pool
@@ -686,6 +702,9 @@ class ModelRunnerKVCacheMixin:
                         head_num=self.model_config.get_num_kv_heads(
                             get_attention_tp_size()
                         ),
+                        head_ids=self.model_config.get_num_kv_head_ids(
+                            get_attention_tp_size(), get_attention_tp_rank()
+                        ),
                         head_dim=self.model_config.head_dim,
                         layer_num=self.num_effective_layers,
                         device=self.device,
@@ -705,6 +724,9 @@ class ModelRunnerKVCacheMixin:
                         head_num=self.model_config.get_num_kv_heads(
                             get_attention_tp_size()
                         ),
+                        head_ids=self.model_config.get_num_kv_head_ids(
+                            get_attention_tp_size(), get_attention_tp_rank()
+                        ),
                         head_dim=self.model_config.head_dim,
                         layer_num=self.num_effective_layers,
                         device=self.device,
@@ -717,10 +739,23 @@ class ModelRunnerKVCacheMixin:
                         ),
                     )
 
+        if RequestCache:
+            RequestCache.get_instance().finish_alloc_static_global_params()
+
         # Initialize token_to_kv_pool_allocator
         need_sort = self.server_args.disaggregation_mode in ("decode", "prefill")
         if self.token_to_kv_pool_allocator is None:
-            if _is_npu and (
+            if RequestCache:
+                self.token_to_kv_pool_allocator = OmniPagedTokenToKVPoolAllocator(
+                    self.max_total_num_tokens,
+                    page_size=self.page_size,
+                    dtype=self.kv_cache_dtype,
+                    device=self.device,
+                    kvcache=self.token_to_kv_pool,
+                    need_sort=need_sort,
+                    request_cache=RequestCache.get_instance(),
+                )
+            elif _is_npu and (
                 self.server_args.attention_backend == "ascend"
                 or self.hybrid_gdn_config is not None
             ):

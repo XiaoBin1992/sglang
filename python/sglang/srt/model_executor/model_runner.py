@@ -26,7 +26,7 @@ import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Union, Dict
 
 import torch
 import torch.distributed as dist
@@ -194,6 +194,7 @@ from sglang.srt.weight_sync.tensor_bucket import (
     FlattenedTensorBucket,
     FlattenedTensorMetadata,
 )
+from sglang.srt.mem_cache.request_cache import RequestCache
 
 _is_hip = is_hip()
 _is_npu = is_npu()
@@ -515,6 +516,12 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             )
             else None
         )
+        self.enable_overlap = not server_args.disable_overlap_schedule
+        if self.server_args.enable_request_cache:
+            RequestCache.get_instance(self.server_args, gpu_id=self.gpu_id, run_device=self.device, create=False)\
+                .init_buffer(self.model_config, self.model, self)
+        
+        self.model_emb_base_loop = hasattr(self.model, "sample")
 
         if (
             self.server_args.remote_instance_weight_loader_use_transfer_engine()
@@ -2619,6 +2626,80 @@ class ModelRunner(ModelRunnerKVCacheMixin):
     def update_decode_attn_backend(self, stream_idx: int):
         self.decode_attn_backend = self.decode_attn_backend_group[stream_idx]
 
+
+    def embedding_lookup(self, rid, input_ids_list, kwargs={}):
+        if self.server_args.enable_request_cache:
+            return RequestCache.get_instance().embedding_lookup(rid, input_ids_list, kwargs=kwargs)
+        else:
+            return None
+
+    def patch_req_info(self, recv_req):
+        if self.server_args.enable_request_cache:
+            RequestCache.get_instance().patch_req_info(recv_req)
+    
+    def cuda_graph_capture_one_batch(self, forward_batch, extend_lens):
+        if self.server_args.enable_request_cache:
+            RequestCache.get_instance().cuda_graph_capture_one_batch(forward_batch, extend_lens)
+
+    def read_from_request_cache_wrapper(self, forward_batch, new_output_dict:bool=False):
+        if self.server_args.enable_request_cache:
+            RequestCache.get_instance().read_from_request_cache_wrapper(forward_batch, new_output_dict)
+            
+    def read_from_request_cache(self, forward_batch, bs, prefix_lens, extend_lens, reqs, new_output_dict:bool=False):
+        if self.server_args.enable_request_cache:
+                RequestCache.get_instance().read_from_request_cache(forward_batch, bs, prefix_lens, extend_lens, reqs,new_output_dict)
+
+    def forward_postprocess_for_pd_decode(self, req: Req, output_id, hidden_states):
+        if self.server_args.enable_request_cache <= 0:
+            return output_id
+        else:
+            return RequestCache.get_instance().forward_postprocess_for_pd_decode(req, output_id, hidden_states)
+
+    def write_to_request_cache(self, bs, prefix_lens, extend_lens, reqs, ids, output_tensor_dict):
+        if self.server_args.enable_request_cache:
+            return RequestCache.get_instance().write_to_request_cache(bs, prefix_lens, extend_lens, reqs, ids, output_tensor_dict,)
+        else:
+            return ids, output_tensor_dict
+
+    def read_from_request_cache_overlap(self, model_worker_batch):
+        if self.server_args.enable_request_cache and not model_worker_batch.forward_mode.is_decode():
+            RequestCache.get_instance().read_from_request_cache_overlap(model_worker_batch)
+
+    def write_to_request_cache_overlap(self, forward_batch, ids, output_tensor_dict):
+        if self.server_args.enable_request_cache:
+            return RequestCache.get_instance().write_to_request_cache_overlap(forward_batch, ids, output_tensor_dict)
+    
+    def write_to_request_cache_sample(self, forward_batch, bs, ids, output_tensor_dict, enable_overlap=False):
+        if self.server_args.enable_request_cache:
+            return RequestCache.get_instance().write_to_request_cache_sample(forward_batch, bs, ids, output_tensor_dict, enable_overlap)
+        else:
+            return ids, output_tensor_dict
+
+    def init_new_for_preprocess(self, model_worker_batch):
+        return RequestCache.get_instance().init_new_for_preprocess(model_worker_batch)
+
+    def cuda_graph_replay(self, forward_batch, bs, raw_bs, prefix_lens, extend_lens, reqs):
+        if self.server_args.enable_request_cache:
+            if self.enable_overlap:
+                ret_tensor_dict = {}
+                request_cache_input = forward_batch.request_cache_input
+                input_buffer_tensor_map = RequestCache.get_instance().input_buffer_tensor_map
+                for key, value in input_buffer_tensor_map.items():
+                    value[:raw_bs].copy_(request_cache_input[key], non_blocking=True)
+                    part_value = value[:bs]
+                    ret_tensor_dict[key] = part_value
+                setattr(forward_batch, f"request_cache_input", ret_tensor_dict)
+            else:    
+                RequestCache.get_instance().cuda_graph_replay(forward_batch, bs, prefix_lens, extend_lens, reqs)
+
+    def resolve_future_input_cache(self, model_worker_batch):
+        if self.server_args.enable_request_cache and model_worker_batch.forward_mode.is_decode():
+            RequestCache.get_instance().resolve_future_input_cache(model_worker_batch)
+
+    def save_output_cache(self, reqs, output_tensor_dict):
+        if self.server_args.enable_request_cache:
+            return RequestCache.get_instance().save_output_cache(reqs, output_tensor_dict)
+    
     def forward_decode(
         self,
         forward_batch: ForwardBatch,
@@ -2824,6 +2905,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             forward_batch.adjust_num_token_non_padded_for_attn_tp(
                 server_args=self.server_args,
             )
+        if not self.enable_overlap:
+            self.read_from_request_cache_wrapper(forward_batch)
 
         # Use precomputed SWA cache location
         if forward_batch.out_cache_loc_swa is not None:
@@ -2881,7 +2964,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         # when structured output (grammar) is used.
         sampling_info.vocab_mask = None
 
-    def sample(
+    def sample_inner(
         self,
         logits_output: LogitsProcessorOutput,
         forward_batch: ForwardBatch,
@@ -2919,6 +3002,19 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         )
         self.maybe_update_ngram_token_table(next_token_ids, forward_batch)
         return next_token_ids
+
+    def sample(
+        self,
+        logits_output: LogitsProcessorOutput,
+        forward_batch: ForwardBatch,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        if self.model_emb_base_loop:
+            next_token_ids, output_tensor_dict = self.model.sample(forward_batch, self.sample_inner, logits_output)
+            batch_size = next_token_ids.shape[0]
+            self.write_to_request_cache_sample(forward_batch, batch_size, next_token_ids, output_tensor_dict, self.enable_overlap)
+            return next_token_ids, output_tensor_dict
+        else:
+            return self.sample_inner(logits_output, forward_batch), None
 
     def compute_logprobs_only(
         self,

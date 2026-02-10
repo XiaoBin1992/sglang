@@ -376,6 +376,7 @@ class Engine(EngineScoreMixin, EngineBase):
         image_data: Optional[MultimodalDataInputFormat] = None,
         audio_data: Optional[MultimodalDataInputFormat] = None,
         video_data: Optional[MultimodalDataInputFormat] = None,
+        input_extra_infos: List[Dict] = None,
         return_logprob: Optional[Union[List[bool], bool]] = False,
         logprob_start_len: Optional[Union[List[int], int]] = None,
         top_logprobs_num: Optional[Union[List[int], int]] = None,
@@ -412,6 +413,7 @@ class Engine(EngineScoreMixin, EngineBase):
             image_data=image_data,
             audio_data=audio_data,
             video_data=video_data,
+            input_extra_infos=input_extra_infos,
             return_logprob=return_logprob,
             logprob_start_len=logprob_start_len,
             top_logprobs_num=top_logprobs_num,
@@ -496,6 +498,9 @@ class Engine(EngineScoreMixin, EngineBase):
         )
         generator = self.tokenizer_manager.generate_request(obj, None)
         return await generator.__anext__()
+
+    async def embedding_lookup(self, rid: str, text_list: List[List[str]] = None, input_ids_list: List[List[int]] = None, aux_info: Dict = None):
+        return await self.tokenizer_manager.embedding_lookup(rid, text_list, input_ids_list, aux_info)
 
     def rerank(
         self,
