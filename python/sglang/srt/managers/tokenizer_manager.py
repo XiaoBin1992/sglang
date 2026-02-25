@@ -938,6 +938,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 bootstrap_room=obj.bootstrap_room,
                 lora_id=obj.lora_id,
                 input_embeds=input_embeds,
+                input_extra_infos=obj.input_extra_infos,
                 session_params=session_params,
                 custom_logit_processor=obj.custom_logit_processor,
                 require_reasoning=obj.require_reasoning,

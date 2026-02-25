@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Tuple, List
 
 import torch
 import torch_npu
@@ -8,6 +8,7 @@ from sglang.srt.mem_cache.memory_pool import (
     MHATokenToKVPool,
     MLATokenToKVPool,
     get_tensor_size_bytes,
+    _alloc_kv_cache,
 )
 from sglang.srt.utils import get_bool_env_var
 
@@ -31,6 +32,8 @@ class NPUMHATokenToKVPool(MHATokenToKVPool):
         end_layer: Optional[int] = None,
         enable_alt_stream: bool = True,
         enable_kv_cache_copy: bool = False,
+        layer_ids: List[int] = None,
+        head_ids: Tuple[int, int] = None,
     ):
         self.use_fia = get_bool_env_var("ASCEND_USE_FIA", "False")
         super().__init__(
@@ -46,6 +49,8 @@ class NPUMHATokenToKVPool(MHATokenToKVPool):
             end_layer=end_layer,
             enable_alt_stream=enable_alt_stream,
             enable_kv_cache_copy=enable_kv_cache_copy,
+            layer_ids=layer_ids,
+            head_ids=head_ids,
         )
 
     def _create_buffers(self):
@@ -54,17 +59,24 @@ class NPUMHATokenToKVPool(MHATokenToKVPool):
             # The padded slot 0 is used for writing dummy outputs from padded tokens.
             # Continuous memory improves the efficiency of Ascend`s transmission backend,
             # while other backends remain unchanged.
-            self.kv_buffer = torch.zeros(
-                (
-                    2,
-                    self.layer_num,
-                    self.size // self.page_size + 1,
-                    self.page_size,
-                    self.head_num,
-                    self.head_dim,
-                ),
+            self.kv_buffer = _alloc_kv_cache(
+                sub_names=["k_buffer", "v_buffer"],
+                layer_ids=self.layer_ids,
+                page_count=self.size//self.page_size,
+                page_size=self.page_size,
+                head_ids=self.head_ids,
+                shape=(self.head_dim),
                 dtype=self.store_dtype,
                 device=self.device,
+                first_n_token_for_dummy_output=self.page_size,
+                view_shape=(
+                        2,
+                        self.layer_num,
+                        self.size // self.page_size + 1,
+                        self.page_size,
+                        self.head_num,
+                        self.head_dim,
+                    ),
             )
             self.k_buffer = self.kv_buffer[0]
             self.v_buffer = self.kv_buffer[1]
@@ -179,6 +191,7 @@ class NPUMLATokenToKVPool(MLATokenToKVPool):
         enable_memory_saver: bool,
         start_layer: Optional[int] = None,
         end_layer: Optional[int] = None,
+        layer_ids: List[int] = None,
     ):
         super(MLATokenToKVPool, self).__init__(
             size=size,
@@ -189,6 +202,7 @@ class NPUMLATokenToKVPool(MLATokenToKVPool):
             enable_memory_saver=enable_memory_saver,
             start_layer=start_layer,
             end_layer=end_layer,
+            layer_ids=layer_ids,
         )
 
         self.kv_lora_rank = kv_lora_rank
@@ -199,39 +213,60 @@ class NPUMLATokenToKVPool(MLATokenToKVPool):
 
         with self.memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE):
             # The padded slot 0 is used for writing dummy outputs from padded tokens.
-            self.k_buffer = torch.zeros(
-                (
-                    layer_num,
-                    self.size // self.page_size + 1,
-                    self.page_size,
-                    1,
-                    self.kv_lora_rank,
-                ),
+            self.k_buffer = _alloc_kv_cache(
+                sub_names="k_buffer",
+                layer_ids=self.layer_ids,
+                page_count=self.size//self.page_size,
+                page_size=self.page_size,
+                head_ids=self.head_ids,
+                shape=(self.kv_lora_rank),
                 dtype=self.store_dtype,
                 device=self.device,
-            )
-            self.v_buffer = torch.zeros(
-                (
-                    layer_num,
-                    self.size // self.page_size + 1,
-                    self.page_size,
-                    1,
-                    self.qk_rope_head_dim,
-                ),
-                dtype=self.store_dtype,
-                device=self.device,
-            )
-            if self.index_head_dim is not None:
-                self.index_k_buffer = torch.zeros(
-                    (
+                first_n_token_for_dummy_output=self.page_size,
+                view_shape=(
                         layer_num,
                         self.size // self.page_size + 1,
                         self.page_size,
                         1,
-                        self.index_head_dim,
+                        self.kv_lora_rank,
                     ),
+            )
+            self.v_buffer = _alloc_kv_cache(
+                sub_names="v_buffer",
+                layer_ids=self.layer_ids,
+                page_count=self.size//self.page_size,
+                page_size=self.page_size,
+                head_ids=self.head_ids,
+                shape=(self.qk_rope_head_dim),
+                dtype=self.store_dtype,
+                device=self.device,
+                first_n_token_for_dummy_output=self.page_size,
+                view_shape=(
+                        layer_num,
+                        self.size // self.page_size + 1,
+                        self.page_size,
+                        1,
+                        self.qk_rope_head_dim,
+                    ),
+            )
+            if self.index_head_dim is not None:
+                self.index_k_buffer = _alloc_kv_cache(
+                    sub_names="v_buffer",
+                    layer_ids=self.layer_ids,
+                    page_count=self.size//self.page_size,
+                    page_size=self.page_size,
+                    head_ids=self.head_ids,
+                    shape=(self.index_head_dim),
                     dtype=self.store_dtype,
                     device=self.device,
+                    first_n_token_for_dummy_output=self.page_size,
+                    view_shape=(
+                            layer_num,
+                            self.size // self.page_size + 1,
+                            self.page_size,
+                            1,
+                            self.index_head_dim,
+                        ),
                 )
 
         self._finalize_allocation_log(size)

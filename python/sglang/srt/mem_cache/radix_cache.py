@@ -838,6 +838,80 @@ class RadixCache(BasePrefixCache):
         return events
 
 
+
+class OmniFlowRadixCache:
+    def __init__(self, params: CacheInitParams, request_cache):
+        self.disable = params.disable
+        self.req_to_token_pool = params.req_to_token_pool
+        self.token_to_kv_pool_allocator = params.token_to_kv_pool_allocator
+        # self.page_size = params.page_size
+        # self.is_eagle = params.is_eagle
+
+        # if self.token_to_kv_pool_allocator:
+        #     self.device = self.token_to_kv_pool_allocator.device
+        # else:
+        #     self.device = torch.device("cpu")
+        
+        self.request_cache = request_cache
+
+
+    def match_prefix(self, params: MatchPrefixParams) -> MatchResult:
+        # TODO check remov page aligned
+        # if self.page_size != 1:
+        #     page_aligned_len = len(key) // self.page_size * self.page_size
+        #     key = key[:page_aligned_len]
+
+        paged_hash_ids = params.req.input_extra_infos["omni_flow"]["paged_hash_ids"]
+        prefill_len = params.req.input_extra_infos["omni_flow"]["prefill_len"]
+        value = torch.tensor(paged_hash_ids).view(-1, 1).repeat(1, self.page_size)[:prefill_len]
+        last_node = None
+        return MatchResult(
+            device_indices=value,
+            last_device_node=last_node,
+            last_host_node=last_node,
+        )
+
+    # def insert(self, key: RadixKey, value=None, chunked=False, priority: int = 0):
+    #     return 0
+
+    def cache_finished_req(self, req: Req, is_insert: bool = True):
+        """Cache request when it finishes."""
+
+        kv_committed_len = req.pop_committed_kv_cache()
+        
+        self.request_cache.publish_finished_req(req.rid, kv_committed_len)
+
+        # Remove req slot release the cache lock
+        self.req_to_token_pool.free(req.req_pool_idx)
+
+    def cache_unfinished_req(self, req: Req, chunked=False):
+        """Cache request when it is unfinished."""
+
+        finish_len = len(req.fill_ids)
+        # kv_indices = self.req_to_token_pool.req_to_token[
+        #     req.req_pool_idx, : finish_len
+        # ]
+        # self.req_to_token_pool.write(
+        #     (req.req_pool_idx, slice(req.cache_protected_len, len(new_indices))),
+        #     new_indices[req.cache_protected_len :],
+        # )
+        req.cache_protected_len = finish_len
+
+        # req.prefix_indices = new_indices
+        # req.last_node = new_last_node
+
+        self.request_cache.publish_unfinished_req(req.rid, finish_len)
+
+    def pretty_print(self):
+        self._print_helper(self.root_node, 0)
+        print(f"#tokens: {self.total_size()}")
+
+    def total_size(self):
+        return self._total_size_helper()
+
+    def evict(self, num_tokens: int):
+        pass
+
 if __name__ == "__main__":
     tree = RadixCache.create_simulated()
 

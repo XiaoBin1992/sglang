@@ -168,7 +168,7 @@ from sglang.srt.managers.session_controller import Session
 from sglang.srt.managers.utils import GenerationBatchResult, validate_input_length
 from sglang.srt.mem_cache.cache_init_params import CacheInitParams
 from sglang.srt.mem_cache.common import release_kv_cache
-from sglang.srt.mem_cache.radix_cache import RadixCache
+from sglang.srt.mem_cache.radix_cache import RadixCache, OmniFlowRadixCache
 from sglang.srt.model_executor.forward_batch_info import ForwardMode, PPProxyTensors
 from sglang.srt.multiplex.multiplexing_mixin import SchedulerMultiplexMixin
 from sglang.srt.parser.reasoning_parser import ReasoningParser
@@ -208,6 +208,7 @@ from sglang.srt.utils.hf_transformers_utils import (
 )
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 from sglang.utils import TypeBasedDispatcher, get_exception_traceback
+from sglang.srt.mem_cache.request_cache import RequestCache
 
 logger = logging.getLogger(__name__)
 
@@ -641,7 +642,11 @@ class Scheduler(
             sliding_window_size=self.sliding_window_size,
         )
 
-        if (
+        if RequestCache:
+            self.tree_cache = OmniFlowRadixCache(params,
+                request_cache=RequestCache.get_instance(),
+            )
+        elif (
             server_args.chunked_prefill_size is not None
             and server_args.disable_radix_cache
         ):
@@ -1468,6 +1473,7 @@ class Scheduler(
                 stream=recv_req.stream,
                 lora_id=recv_req.lora_id,
                 input_embeds=recv_req.input_embeds,
+                input_extra_infos=recv_req.input_extra_infos,
                 custom_logit_processor=recv_req.custom_logit_processor,
                 require_reasoning=recv_req.require_reasoning,
                 return_hidden_states=recv_req.return_hidden_states,

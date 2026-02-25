@@ -504,6 +504,7 @@ class Req:
         origin_input_ids_unpadded: Optional[Tuple[int]] = None,
         lora_id: Optional[str] = None,
         input_embeds: Optional[List[List[float]]] = None,
+        input_extra_infos: Optional[Dict] = None,
         token_type_ids: List[int] = None,
         session_id: Optional[str] = None,
         custom_logit_processor: Optional[str] = None,
@@ -539,6 +540,7 @@ class Req:
         self.fill_ids = []
         self.session_id = session_id
         self.input_embeds = input_embeds
+        self.input_extra_infos = input_extra_infos
 
         # For req-level memory management
         self.kv_committed_len = 0
@@ -1251,6 +1253,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     # Batched arguments to model runner
     input_ids: torch.Tensor = None  # shape: [b], int64
     input_embeds: torch.Tensor = None  # shape: [b, hidden_size], float32
+    input_extra_infos: Optional[Dict] = None
     token_type_ids: torch.Tensor = None  # shape: [b], int64
     req_pool_indices: torch.Tensor = None  # shape: [b], int64
     seq_lens: torch.Tensor = None  # shape: [b], int64
@@ -1830,6 +1833,11 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     def check_decode_mem(
         self, buf_multiplier=1, selected_indices: Optional[List[int]] = None
     ):
+        server_args = get_global_server_args()
+        # TODO @xiaobin retract
+        if server_args.enable_request_cache:
+            return True
+
         num_tokens = (
             self.new_page_count_next_decode(selected_indices)
             * buf_multiplier

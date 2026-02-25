@@ -252,6 +252,7 @@ def evict_from_tree_cache(tree_cache: BasePrefixCache | None, num_tokens: int):
 
 
 def alloc_paged_token_slots_extend(
+    batch: ScheduleBatch,
     tree_cache: BasePrefixCache,
     prefix_lens: torch.Tensor,
     prefix_lens_cpu: torch.Tensor,
@@ -277,6 +278,7 @@ def alloc_paged_token_slots_extend(
         seq_lens_cpu,
         last_loc,
         extend_num_tokens,
+        reqs=batch.reqs,
     )
 
     if out_cache_loc is None:
@@ -373,6 +375,7 @@ def alloc_for_extend(
             seq_lens_cpu=batch.seq_lens_cpu,
             last_loc=torch.cat(last_loc),
             extend_num_tokens=batch.extend_num_tokens,
+            reqs=batch.reqs,
         )
 
     # Write to req_to_token_pool
@@ -394,6 +397,7 @@ def alloc_for_extend(
 
 
 def alloc_paged_token_slots_decode(
+    batch: ScheduleBatch,
     tree_cache: BasePrefixCache,
     seq_lens: torch.Tensor,
     seq_lens_cpu: torch.Tensor,
@@ -406,7 +410,7 @@ def alloc_paged_token_slots_decode(
     num_tokens = len(seq_lens) * allocator.page_size
     evict_from_tree_cache(tree_cache, num_tokens)
 
-    out_cache_loc = allocator.alloc_decode(seq_lens, seq_lens_cpu, last_loc)
+    out_cache_loc = allocator.alloc_decode(seq_lens, seq_lens_cpu, last_loc, reqs=batch.reqs)
 
     if out_cache_loc is None:
         error_msg = (
@@ -444,6 +448,7 @@ def alloc_for_decode(batch: ScheduleBatch, token_per_req: int) -> torch.Tensor:
         ]
         seq_lens_next = batch.seq_lens + token_per_req
         out_cache_loc = alloc_paged_token_slots_decode(
+            batch=batch,
             tree_cache=batch.tree_cache,
             seq_lens=seq_lens_next,
             seq_lens_cpu=batch.seq_lens_cpu + token_per_req,

@@ -33,6 +33,8 @@ class SWAKVPool(KVCache):
         enable_kvcache_transpose: bool,
         device: str,
         token_to_kv_pool_class: KVCache = MHATokenToKVPool,
+        head_ids: Tuple[int, int] = None,
+        sliding_window_size: int = None,
         **kwargs,
     ):
         self.size = size
@@ -50,6 +52,7 @@ class SWAKVPool(KVCache):
         kwargs["page_size"] = page_size
         kwargs["enable_memory_saver"] = False
         kwargs["head_num"] = head_num
+        kwargs["head_ids"] = head_ids
         kwargs["head_dim"] = head_dim
         kwargs["device"] = device
         # TODO MHATransposedTokenToKVPool if enable_kvcache_transpose is True
@@ -64,15 +67,19 @@ class SWAKVPool(KVCache):
             size=size_swa,
             dtype=dtype,
             layer_num=self.swa_layer_nums,
+            layer_ids=swa_attention_layer_ids,
+            sliding_window_size=sliding_window_size,
             **kwargs,
         )
         kwargs.pop("swa_head_num", None)
+        kwargs.pop("swa_heads_range", None)
         kwargs.pop("swa_head_dim", None)
         kwargs.pop("swa_v_head_dim", None)
         self.full_kv_pool = token_to_kv_pool_class(
             size=size,
             dtype=dtype,
             layer_num=self.full_layer_nums,
+            layer_ids=full_attention_layer_ids,
             **kwargs,
         )
         # {layer_id: (index, is_swa_layer)}

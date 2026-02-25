@@ -343,6 +343,7 @@ class PagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         seq_lens_cpu: torch.Tensor,
         last_loc: torch.Tensor,
         extend_num_tokens: int,
+        **kwargs,
     ):
         if self.debug_mode:
             assert torch.all(
@@ -393,6 +394,7 @@ class PagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         seq_lens: torch.Tensor,
         seq_lens_cpu: torch.Tensor,
         last_loc: torch.Tensor,
+        **kwargs,
     ):
         if self.debug_mode:
             assert torch.all(
@@ -457,3 +459,104 @@ class PagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
 
     def load_cpu_copy(self, kv_cache_cpu, indices):
         return self._kvcache.load_cpu_copy(kv_cache_cpu, indices)
+
+
+
+class OmniPagedTokenToKVPoolAllocator:
+    """
+    An allocator managing the indices to kv cache data.
+
+    This class has the same interface as `TokenToKVPoolAllocator` but the output
+    of one request is always page-aligned.
+
+    TODO: fuse last_loc into the kernel.
+    """
+
+    def __init__(
+        self,
+        size: int,
+        page_size: int,
+        dtype: torch.dtype,
+        device: str,
+        kvcache: KVCache,
+        need_sort: bool,
+        request_cache,
+    ):
+        self.size = size
+        self.page_size = page_size
+        self.dtype = dtype
+        self.device = device
+        self._kvcache = kvcache
+        self.need_sort = need_sort
+        self.num_pages = size // page_size
+        self.free_pages = self.num_pages
+        self.request_cache = request_cache
+    
+    def available_size(self):
+        return self.size
+
+    def get_kvcache(self):
+        return self._kvcache
+
+    def alloc(self, need_size: int):
+        raise NotImplementedError()
+
+    def alloc_extend(
+        self,
+        prefix_lens: torch.Tensor,
+        prefix_lens_cpu: torch.Tensor,
+        seq_lens: torch.Tensor,
+        seq_lens_cpu: torch.Tensor,
+        last_loc: torch.Tensor,
+        extend_num_tokens: int,
+        reqs,
+        **kwargs,
+    ):
+
+        out_indices = torch.empty(
+            (extend_num_tokens,), dtype=torch.int64, device=self.device
+        )
+        out_indices_offset = 0
+        for req, prefix_len, seq_len in zip(reqs, prefix_lens_cpu, seq_lens_cpu):
+            extend_len = seq_len - prefix_len
+            paged_hash_ids = req.input_extra_infos["paged_hash_ids"]
+            for idx in range(extend_len):
+                out_indices[out_indices_offset + idx] = paged_hash_ids[(prefix_len + idx) // self.page_size]
+            out_indices_offset += extend_len
+
+        return out_indices
+
+    def alloc_decode(
+        self,
+        seq_lens: torch.Tensor,
+        seq_lens_cpu: torch.Tensor,
+        last_loc: torch.Tensor,
+        reqs,
+        **kwargs,
+    ):
+        bs = len(seq_lens)
+        out_indices = torch.empty((bs,), dtype=torch.int64, device=self.device)
+
+        alloc_more_page_reqs = []
+        for req, seq_len in zip(reqs, seq_lens_cpu):
+            paged_hash_ids = req.input_extra_infos["omni_flow"]["paged_hash_ids"]
+            if len(paged_hash_ids) * self.page_size < seq_len:
+                alloc_more_page_reqs.append(req)
+        
+        paged_hash_ids_extend_list = self.request_cache.alloc_decode([req.rid for req in alloc_more_page_reqs])
+        for req, paged_hash_ids_extend in zip(alloc_more_page_reqs, paged_hash_ids_extend_list):
+            req.input_extra_infos["omni_flow"]["paged_hash_ids"].extend(paged_hash_ids_extend)
+
+        out_indices_offset = 0
+        for req, seq_len in zip(reqs, seq_lens_cpu):
+            paged_hash_ids = req.input_extra_infos["omni_flow"]["paged_hash_ids"]
+            out_indices[out_indices_offset] = paged_hash_ids[seq_len // self.page_size]
+            out_indices_offset += 1
+
+        return out_indices
+
+    def free(self, free_index: torch.Tensor):
+        pass
+
+    def clear(self):
+        pass

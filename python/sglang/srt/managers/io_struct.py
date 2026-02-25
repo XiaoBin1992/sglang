@@ -170,6 +170,7 @@ class GenerateReqInput(BaseReq, APIServingTimingMixin):
     input_ids: Optional[Union[List[List[int]], List[int]]] = None
     # The embeddings for input_ids; one can specify either text or input_ids or input_embeds.
     input_embeds: Optional[Union[List[List[List[float]]], List[List[float]]]] = None
+    input_extra_infos: Optional[Union[List[Dict], Dict]] = None
     # The image input. It can be an image instance, file name, URL, or base64 encoded string.
     # Can be formatted as:
     # - Single image for a single request
@@ -384,6 +385,11 @@ class GenerateReqInput(BaseReq, APIServingTimingMixin):
         if not self.token_ids_logprob:  # covers both None and []
             self.token_ids_logprob = None
 
+    def _normalize_input_extra_infos(self, num):
+        """Normalize input extra infos for batch processing."""
+        if isinstance(self.input_extra_infos, dict):
+            self.input_extra_infos = [self.input_extra_infos]
+
     def _normalize_batch_inputs(self):
         """Normalize inputs for a batch of examples, including parallel sampling expansion."""
         # Calculate expanded batch size
@@ -404,6 +410,7 @@ class GenerateReqInput(BaseReq, APIServingTimingMixin):
         self._normalize_logprob_params(num)
         self._normalize_custom_logit_processor(num)
         self._normalize_bootstrap_params(num)
+        self._normalize_input_extra_infos(num)
 
     def _expand_inputs(self, num):
         """Expand the main inputs (text, input_ids, input_embeds) for parallel sampling."""
@@ -621,6 +628,7 @@ class GenerateReqInput(BaseReq, APIServingTimingMixin):
             input_embeds=(
                 self.input_embeds[i] if self.input_embeds is not None else None
             ),
+            input_extra_infos=self.input_extra_infos[i] if self.input_extra_infos is not None else None,
             image_data=self.image_data[i],
             video_data=self.video_data[i],
             audio_data=self.audio_data[i],
@@ -716,6 +724,7 @@ class TokenizedGenerateReqInput(BaseReq):
 
     # The input embeds
     input_embeds: Optional[Union[List[List[List[float]]], List[List[float]]]] = None
+    input_extra_infos: Optional[Dict] = None
 
     # Session info for continual prompting
     session_params: Optional[SessionParams] = None
