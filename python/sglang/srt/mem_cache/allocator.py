@@ -519,9 +519,9 @@ class OmniPagedTokenToKVPoolAllocator:
         out_indices_offset = 0
         for req, prefix_len, seq_len in zip(reqs, prefix_lens_cpu, seq_lens_cpu):
             extend_len = seq_len - prefix_len
-            paged_hash_ids = req.input_extra_infos["paged_hash_ids"]
+            slots = req.input_extra_infos["omni_flow"]["slots"]
             for idx in range(extend_len):
-                out_indices[out_indices_offset + idx] = paged_hash_ids[(prefix_len + idx) // self.page_size]
+                out_indices[out_indices_offset + idx] = slots[(prefix_len + idx) // self.page_size]
             out_indices_offset += extend_len
 
         return out_indices
@@ -539,18 +539,18 @@ class OmniPagedTokenToKVPoolAllocator:
 
         alloc_more_page_reqs = []
         for req, seq_len in zip(reqs, seq_lens_cpu):
-            paged_hash_ids = req.input_extra_infos["omni_flow"]["paged_hash_ids"]
-            if len(paged_hash_ids) * self.page_size < seq_len:
+            slots = req.input_extra_infos["omni_flow"]["slots"]
+            if len(slots) * self.page_size < seq_len:
                 alloc_more_page_reqs.append(req)
         
         paged_hash_ids_extend_list = self.request_cache.alloc_page_for_decode([req.rid for req in alloc_more_page_reqs])
         for req, paged_hash_ids_extend in zip(alloc_more_page_reqs, paged_hash_ids_extend_list):
-            req.input_extra_infos["omni_flow"]["paged_hash_ids"].extend(paged_hash_ids_extend)
+            req.input_extra_infos["omni_flow"]["slots"].extend(paged_hash_ids_extend)
 
         out_indices_offset = 0
         for req, seq_len in zip(reqs, seq_lens_cpu):
-            paged_hash_ids = req.input_extra_infos["omni_flow"]["paged_hash_ids"]
-            out_indices[out_indices_offset] = paged_hash_ids[seq_len // self.page_size]
+            slots = req.input_extra_infos["omni_flow"]["slots"]
+            out_indices[out_indices_offset] = slots[seq_len // self.page_size]
             out_indices_offset += 1
 
         return out_indices
