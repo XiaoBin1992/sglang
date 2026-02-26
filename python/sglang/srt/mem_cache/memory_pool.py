@@ -170,7 +170,7 @@ def _alloc_kv_cache(sub_names, layer_ids, page_count, page_size, head_ids, shape
     if isinstance(layer_ids, int):
         layer_ids = [layer_ids]
     if RequestCache:
-        tensor = RequestCache.get_instance().alloc_buffer("kv_cache",
+        tensor = RequestCache.get_instance().alloc_static_global_params("kv_cache",
             sub_names, 
             layer_ids,
             page_count, 

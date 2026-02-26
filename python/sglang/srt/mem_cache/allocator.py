@@ -543,7 +543,7 @@ class OmniPagedTokenToKVPoolAllocator:
             if len(paged_hash_ids) * self.page_size < seq_len:
                 alloc_more_page_reqs.append(req)
         
-        paged_hash_ids_extend_list = self.request_cache.alloc_decode([req.rid for req in alloc_more_page_reqs])
+        paged_hash_ids_extend_list = self.request_cache.alloc_page_for_decode([req.rid for req in alloc_more_page_reqs])
         for req, paged_hash_ids_extend in zip(alloc_more_page_reqs, paged_hash_ids_extend_list):
             req.input_extra_infos["omni_flow"]["paged_hash_ids"].extend(paged_hash_ids_extend)
 
