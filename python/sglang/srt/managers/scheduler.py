@@ -2363,7 +2363,7 @@ class Scheduler(
             #       in the GenerationBatchOutput for processing after copy_done.
             batch.output_ids = future_indices_or_next_token_ids
             if not self.enable_overlap:
-                self.tp_worker.model_runner.save_output_cache(batch.reqs, batch.output_tensor_dict)
+                self.tp_worker.model_runner.save_output_cache(batch.reqs, batch_result.output_tensor_dict)
             # These 2 values are needed for processing the output, but the values can be
             # modified by overlap schedule. So we have to copy them here so that
             # we can use the correct values in output processing.

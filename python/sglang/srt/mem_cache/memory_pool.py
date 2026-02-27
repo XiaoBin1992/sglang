@@ -170,7 +170,7 @@ def _alloc_kv_cache(sub_names, layer_ids, page_count, page_size, head_ids, shape
     if isinstance(layer_ids, int):
         layer_ids = [layer_ids]
     if RequestCache:
-        tensor = RequestCache.get_instance().alloc_static_global_params("kv_cache",
+        tensor = RequestCache.get_instance().alloc_global_params("kv_cache",
             sub_names, 
             layer_ids,
             page_count, 
@@ -1496,7 +1496,7 @@ class MLATokenToKVPool(KVCache):
                         page_count=self.size//self.page_size,
                         page_size=self.page_size,
                         head_ids=self.head_ids,
-                        shape=(self.kv_cache_dim),
+                        shapes=(self.kv_cache_dim,),
                         dtype=self.store_dtype,
                         device=self.device,
                         first_n_token_for_dummy_output=self.page_size,
@@ -2022,11 +2022,6 @@ class DoubleSparseTokenToKVPool(KVCache):
             ):
                 # [size, head_num, head_dim] for each layer
                 self.k_buffer = [
-                    torch.zeros(
-                        (size + page_size, head_num, head_dim),
-                        dtype=dtype,
-                        device=device,
-                    )
                     _alloc_kv_cache(
                         sub_names="k_buffer",
                         layer_ids=self.layer_ids[layer_idx],

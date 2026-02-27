@@ -1884,17 +1884,13 @@ class LazyDumpTensorsReqOutput(BaseReq):
 
 
 @dataclass
-class EmbeddingLookupReqInput:
-    # The request id
-    rid: str
+class EmbeddingLookupReqInput(BaseReq):
     # The input token ids
     input_ids_list: List[List[int]]
     aux_info: Dict
 
 @dataclass
-class EmbeddingLookupReqOutput:
-    # The request id
-    rid: str
+class EmbeddingLookupReqOutput(BaseReq):
     output_dict: Dict[str, Any]
 
 

@@ -2455,7 +2455,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         )
         return next_token_ids
 
-    def sample_imple(
+    def sample(
         self,
         logits_output: LogitsProcessorOutput,
         forward_batch: ForwardBatch,
