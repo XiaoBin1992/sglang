@@ -878,8 +878,7 @@ class OmniFlowRadixCache:
         """Cache request when it finishes."""
 
         kv_committed_len = req.pop_committed_kv_cache()
-        
-        self.request_cache.publish_finished_req(req.rid, kv_committed_len)
+        self.request_cache.publish_finished_req(req, kv_committed_len)
 
         # Remove req slot release the cache lock
         self.req_to_token_pool.free(req.req_pool_idx)
@@ -900,7 +899,7 @@ class OmniFlowRadixCache:
         # req.prefix_indices = new_indices
         # req.last_node = new_last_node
 
-        self.request_cache.publish_unfinished_req(req.rid, finish_len)
+        self.request_cache.publish_unfinished_req(req, finish_len)
 
     def pretty_print(self):
         self._print_helper(self.root_node, 0)
