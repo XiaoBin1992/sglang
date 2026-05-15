@@ -20,7 +20,7 @@ Page-aligned memory pool.
 """
 
 import abc
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 import triton
@@ -552,6 +552,7 @@ class OmniPagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         kvcache: KVCache,
         need_sort: bool,
         request_cache,
+        first_n_token_for_dummy_output: Optional[int] = None,
     ):
         # Skip BaseTokenToKVPoolAllocator.__init__ side effects (free_pages
         # etc.) that don't apply to externally-owned slots, but keep the same
@@ -566,9 +567,23 @@ class OmniPagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         self.is_not_in_free_group = True
         self.free_group = []
         self.request_cache = request_cache
-        # No dummy_output reservation in this path; keep the attribute so the
-        # radix cache slot translation remains a no-op.
-        self.dummy_page_offset = 0
+        # KV pool layout reserves `first_n_token_for_dummy_output` tokens at
+        # the front for dummy outputs (cuda-graph padding, masked tokens).
+        # Actor-side slot ids count from 0 over the *real* slot region, so we
+        # must add `dummy_page_offset` pages before turning a slot id into a
+        # KV-pool index. Keep this in lockstep with memory_pool.py, where
+        # `view_shape[0] = size + page_size` and the per-layer kv buffer is
+        # allocated with `first_n_token_for_dummy_output=self.page_size`.
+        if first_n_token_for_dummy_output is None:
+            first_n_token_for_dummy_output = page_size
+        assert first_n_token_for_dummy_output >= 0
+        if first_n_token_for_dummy_output > 0:
+            assert first_n_token_for_dummy_output % page_size == 0, (
+                f"first_n_token_for_dummy_output ({first_n_token_for_dummy_output}) "
+                f"must be a multiple of page_size ({page_size})"
+            )
+        self.first_n_token_for_dummy_output = first_n_token_for_dummy_output
+        self.dummy_page_offset = first_n_token_for_dummy_output // page_size
 
     def debug_print(self) -> str:
         return f"OmniPagedTokenToKVPoolAllocator(size={self.size}, page_size={self.page_size})"
@@ -639,7 +654,9 @@ class OmniPagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
             slots = req.input_extra_infos["omni_flow"]["slots"]
             for i in range(extend_len):
                 pos = prefix_len + i
-                page_id = slots[pos // self.page_size]
+                # Actor slot id 0 maps to the first real KV page, which sits
+                # *after* the dummy_output region in the KV buffer view.
+                page_id = slots[pos // self.page_size] + self.dummy_page_offset
                 out_indices_cpu[offset + i] = (
                     page_id * self.page_size + (pos % self.page_size)
                 )
@@ -669,7 +686,9 @@ class OmniPagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
             seq_len = int(seq_len_t)
             new_token_pos = seq_len - 1
             slots = req.input_extra_infos["omni_flow"]["slots"]
-            page_id = slots[new_token_pos // self.page_size]
+            # See alloc_extend: shift actor slot id past the dummy_output
+            # region before turning it into a KV-pool index.
+            page_id = slots[new_token_pos // self.page_size] + self.dummy_page_offset
             out_indices_cpu[i] = (
                 page_id * self.page_size + (new_token_pos % self.page_size)
             )
