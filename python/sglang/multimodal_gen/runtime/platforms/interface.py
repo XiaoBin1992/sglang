@@ -39,6 +39,7 @@ class AttentionBackendEnum(enum.Enum):
     SLA_ATTN = enum.auto()
     SAGE_SLA_ATTN = enum.auto()
     NO_ATTENTION = enum.auto()
+    FA_PAGED = enum.auto()
 
     def __str__(self):
         return self.name.lower()

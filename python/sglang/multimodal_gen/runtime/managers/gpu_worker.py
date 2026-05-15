@@ -133,6 +133,11 @@ class GPUWorker:
         else:
             setproctitle(f"sgl_diffusion::scheduler_{self.local_rank}")
 
+        # Baseline GPU memory before model load — used by the paged KV pool
+        # profiler to compute leftover bytes the same way the LLM runtime does
+        # in ModelRunnerKVCacheMixin._profile_available_bytes.
+        pre_pipeline_load_memory_gb = self._maybe_measure_pre_pipeline_memory()
+
         self.pipeline = build_pipeline(self.server_args)
 
         # apply layerwise offload after lora is applied while building LoRAPipeline
@@ -155,9 +160,83 @@ class GPUWorker:
                             f"Module {type(dit).__name__} does not support layerwise offload. Skipping."
                         )
 
+        # Allocate the paged KV cache pool. Reuses LLM-side MHATokenToKVPool
+        # so the resulting buffers route through OmniFlow's RequestCache when
+        # enable_request_cache is on.
+        self.kv_pool = self._maybe_init_paged_kv_pool(pre_pipeline_load_memory_gb)
+        if self.kv_pool is not None:
+            self.pipeline.kv_pool = self.kv_pool
+
         logger.info(
             f"Worker {self.rank}: Initialized device, model, and distributed environment."
         )
+
+    def _maybe_measure_pre_pipeline_memory(self) -> float:
+        """Probe available GPU memory before build_pipeline. Returns GB."""
+        if not getattr(self.server_args, "enable_paged_kv_cache", False):
+            return 0.0
+        from sglang.srt.utils.common import get_available_gpu_memory
+
+        return get_available_gpu_memory(
+            device="cuda",
+            gpu_id=self.local_rank,
+            distributed=torch.distributed.is_initialized(),
+            empty_cache=True,
+        )
+
+    def _maybe_init_paged_kv_pool(self, pre_pipeline_load_memory_gb: float):
+        if not getattr(self.server_args, "enable_paged_kv_cache", False):
+            return None
+        from sglang.multimodal_gen.runtime.managers.kv_pool_initializer import (
+            init_diffusion_kv_pool,
+        )
+
+        return init_diffusion_kv_pool(
+            server_args=self.server_args,
+            pipeline=self.pipeline,
+            device="cuda",
+            gpu_id=self.local_rank,
+            pre_pipeline_load_memory_gb=pre_pipeline_load_memory_gb,
+            distributed=torch.distributed.is_initialized(),
+        )
+
+    def _maybe_attach_paged_metadata(self, batch: List[Req]) -> None:
+        """Translate any per-Req ``omni_flow`` info into paged attn metadata.
+
+        Each Req may carry ``req.extra["omni_flow"]`` with the same dict
+        ``omni_flow.compute_flow.llm.sglang_backend`` writes
+        (``prefix_len`` / ``extend_len`` / ``slots``). Translation is
+        idempotent — if ``paged_attn_metadata`` already exists we leave it
+        alone (that lets advanced callers build metadata themselves and skip
+        the auto-path entirely).
+        """
+        from sglang.multimodal_gen.runtime.managers.omni_flow_adapter import (
+            attach_paged_metadata_from_omni_flow,
+        )
+
+        for req in batch:
+            extra = getattr(req, "extra", None)
+            if not isinstance(extra, dict):
+                continue
+            if extra.get("paged_attn_metadata") is not None:
+                continue
+            omni_flow_info = extra.get("omni_flow")
+            if not omni_flow_info:
+                continue
+            try:
+                attach_paged_metadata_from_omni_flow(
+                    req=req,
+                    kv_pool=self.kv_pool,
+                    omni_flow_info=omni_flow_info,
+                    dummy_page_offset=int(extra.get("dummy_page_offset", 0)),
+                )
+            except Exception as e:
+                logger.error(
+                    "Failed to attach paged_attn_metadata for req=%s: %s",
+                    getattr(req, "request_id", "?"),
+                    e,
+                )
+                raise
 
     def do_mem_analysis(self, output_batch: OutputBatch):
         final_snapshot = capture_memory_snapshot()
@@ -213,6 +292,21 @@ class GPUWorker:
         Execute a forward pass.
         """
         assert self.pipeline is not None
+        # OmniFlow paged-KV hook: when callers pass an "omni_flow" dict on
+        # Req.extra (same wire format as LLM-side input_extra_infos), build
+        # PagedFlashAttentionMetadata once and stuff it on Req.extra so the
+        # denoising stage can pick it up via forward_context.
+        if getattr(self, "kv_pool", None) is not None:
+            self._maybe_attach_paged_metadata(batch)
+        if len(batch) > 1:
+            if return_req:
+                raise ValueError(
+                    "Grouped execute_forward does not support return_req=True"
+                )
+            # grouped reqs currently come only from expanded num_outputs_per_prompt
+            self._validate_group_forward_reqs(batch)
+            return self._execute_forward_batch(batch)
+
         req = batch[0]
         output_batch = None
         try:

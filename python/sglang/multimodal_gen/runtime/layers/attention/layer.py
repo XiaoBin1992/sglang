@@ -231,6 +231,7 @@ class LocalAttention(nn.Module):
         softmax_scale: float | None = None,
         causal: bool = False,
         supported_attention_backends: set[AttentionBackendEnum] | None = None,
+        prefix: str = "",
         **extra_impl_args,
     ) -> None:
         super().__init__()
@@ -252,6 +253,7 @@ class LocalAttention(nn.Module):
             softmax_scale=self.softmax_scale,
             num_kv_heads=num_kv_heads,
             causal=causal,
+            prefix=prefix,
             **extra_impl_args,
         )
         wrap_attention_impl_forward(self.attn_impl)

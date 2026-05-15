@@ -335,6 +335,12 @@ class CudaPlatformBase(Platform):
         elif selected_backend == AttentionBackendEnum.SAGE_SLA_ATTN:
             logger.info("Using Sage Sparse Linear Attention backend")
             return "sglang.multimodal_gen.runtime.layers.attention.backends.sparse_linear_attn.SageSparseLinearAttentionBackend"
+        elif selected_backend == AttentionBackendEnum.FA_PAGED:
+            logger.info("Using Paged FlashAttention backend (OmniFlow)")
+            return (
+                "sglang.multimodal_gen.runtime.layers.attention.backends."
+                "paged_flash_attn.PagedFlashAttentionBackend"
+            )
         elif selected_backend == AttentionBackendEnum.FA2:
             from sglang.multimodal_gen.runtime.layers.attention.backends.flash_attn_2 import (  # noqa: F401
                 FlashAttention2Backend,

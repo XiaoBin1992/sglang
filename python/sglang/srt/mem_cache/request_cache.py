@@ -1,9 +1,7 @@
 import os
+import logging
 import importlib
-from sglang.srt.utils import (
-    get_colorful_logger,
-)
-logger = get_colorful_logger(__name__)
+logger = logging.getLogger(__name__)
 # ============ 动态导入 RequestCache ============
 def _import_request_cache():
     # 读取环境变量

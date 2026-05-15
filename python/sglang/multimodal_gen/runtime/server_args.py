@@ -229,6 +229,13 @@ class ServerArgs:
     # MoE parameters used by Wan2.2
     boundary_ratio: float | None = None
 
+    # Paged KV cache (OmniFlow). Mirrors sglang LLM ServerArgs naming/semantics.
+    enable_paged_kv_cache: bool = False
+    page_size: int = 64
+    mem_fraction_static: float = 0.85
+    kv_cache_dtype: str = "auto"
+    max_total_num_tokens: int | None = None
+
     # Logging
     log_level: str = "info"
     uvicorn_access_log_exclude_prefixes: list[str] = field(default_factory=list)

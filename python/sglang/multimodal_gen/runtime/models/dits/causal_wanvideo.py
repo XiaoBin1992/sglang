@@ -68,6 +68,7 @@ class CausalWanSelfAttention(nn.Module):
         qk_norm=True,
         eps=1e-6,
         parallel_attention=False,
+        prefix: str = "",
     ) -> None:
         assert dim % num_heads == 0
         super().__init__()
@@ -83,7 +84,8 @@ class CausalWanSelfAttention(nn.Module):
             32760 if local_attn_size == -1 else local_attn_size * 1560
         )
 
-        # Scaled dot product attention
+        # Scaled dot product attention. Pass prefix so paged backends can
+        # derive layer_id from "...blocks.<idx>.attn".
         self.attn = LocalAttention(
             num_heads=num_heads,
             head_size=self.head_dim,
@@ -92,9 +94,11 @@ class CausalWanSelfAttention(nn.Module):
             causal=False,
             supported_attention_backends=(
                 AttentionBackendEnum.FA,
+                AttentionBackendEnum.FA_PAGED,
                 AttentionBackendEnum.AITER,
                 AttentionBackendEnum.TORCH_SDPA,
             ),
+            prefix=f"{prefix}.attn",
         )
 
     def forward(
@@ -283,6 +287,7 @@ class CausalWanTransformerBlock(nn.Module):
             sink_size=sink_size,
             qk_norm=qk_norm,
             eps=eps,
+            prefix=f"{prefix}.attn1",
         )
         self.hidden_dim = dim
         self.num_attention_heads = num_heads

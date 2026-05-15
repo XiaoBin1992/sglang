@@ -104,8 +104,33 @@ class CausalDMDDenoisingStage(DenoisingStage):
         prompt_embeds = batch.prompt_embeds
         assert torch.isnan(prompt_embeds[0]).sum() == 0
 
+        # OmniFlow paged-KV mode: an external scheduler has installed a
+        # MHATokenToKVPool on the pipeline and pre-built attn_metadata via
+        # ``build_paged_metadata``. Skip the legacy dense kv_cache1 alloc.
+        paged_kv_pool = getattr(self, "kv_pool", None) or getattr(
+            getattr(self, "transformer", None), "kv_pool", None
+        )
+        self._paged_kv_mode = paged_kv_pool is not None
+
         # Initialize or reset caches
-        if self.kv_cache1 is None:
+        if self._paged_kv_mode:
+            # Paged path: KV lives in kv_pool; dense kv_cache1 is unused.
+            self.kv_cache1 = None
+            # Cross-attention cache is still dense — text KV is short-lived
+            # and not paged.
+            if self.crossattn_cache is None:
+                self._initialize_crossattn_cache(
+                    batch_size=latents.shape[0],
+                    max_text_len=server_args.pipeline_config.text_encoder_configs[
+                        0
+                    ].arch_config.text_len,
+                    dtype=target_dtype,
+                    device=latents.device,
+                )
+            else:
+                for block_index in range(self.num_transformer_blocks):
+                    self.crossattn_cache[block_index]["is_init"] = False  # type: ignore
+        elif self.kv_cache1 is None:
             self._initialize_kv_cache(
                 batch_size=latents.shape[0], dtype=target_dtype, device=latents.device
             )
@@ -249,8 +274,21 @@ class CausalDMDDenoisingStage(DenoisingStage):
                     # Prepare inputs
                     t_expand = t_cur.repeat(latent_model_input.shape[0])
 
-                    # Attention metadata if needed
-                    if (
+                    # Attention metadata if needed.
+                    # Paged-KV mode comes first: the external scheduler stuffs
+                    # a PagedFlashAttentionMetadata-like object into
+                    # ``batch.extra["paged_attn_metadata"]``; we just refresh
+                    # current_timestep and pass it through.
+                    if self._paged_kv_mode and isinstance(
+                        getattr(batch, "extra", None), dict
+                    ) and batch.extra.get("paged_attn_metadata") is not None:
+                        attn_metadata = batch.extra["paged_attn_metadata"]
+                        # Keep timestep in sync so impls that branch on it work.
+                        try:
+                            attn_metadata.current_timestep = i
+                        except Exception:
+                            pass
+                    elif (
                         self.attn_backend.get_enum()
                         == AttentionBackendEnum.VIDEO_SPARSE_ATTN
                     ):
