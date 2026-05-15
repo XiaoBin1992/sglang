@@ -193,6 +193,9 @@ def _handle_output_by_index(output, i):
             output_hidden_states=_extract_field_by_index(
                 output, "output_hidden_states", i, check_length=False
             ),
+            output_extra_infos=_extract_field_by_index(
+                output, "output_extra_infos", i, check_length=False
+            ),
             placeholder_tokens_idx=None,
             placeholder_tokens_val=None,
             token_steps=_extract_field_by_index(
@@ -274,6 +277,9 @@ def _handle_output_by_index(output, i):
             ),
             customized_info=_extract_field_by_index(
                 output, "customized_info", i, check_length=False
+            ),
+            output_extra_infos=_extract_field_by_index(
+                output, "output_extra_infos", i, check_length=False
             ),
             dp_ranks=_extract_field_by_index(output, "dp_ranks", i, check_length=False),
             placeholder_tokens_idx=None,

@@ -1736,7 +1736,7 @@ class Scheduler(
         output_dict = self.tp_worker.model_runner.embedding_lookup(recv_req.rid, recv_req.input_ids_list, recv_req.aux_info)
         # if self.attn_tp_rank == 0:
         res = EmbeddingLookupReqOutput(rid=recv_req.rid, output_dict=output_dict)
-        self.send_to_tokenizer.send_pyobj(res)
+        self.send_to_tokenizer.send_output(res, recv_req)
 
     def handle_generate_request(
         self,

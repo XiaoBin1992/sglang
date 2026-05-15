@@ -612,6 +612,10 @@ class Req(ReqDllmMixin):
         self.session = session
         self.input_embeds = input_embeds
         self.input_extra_infos = input_extra_infos
+        # Per-request bag of extra info filled in during scheduling/sampling
+        # (e.g. omni_flow's request_cache writes output tensor metadata here).
+        # Surfaced back to the user via the output dict.
+        self.output_extra_info: Dict[str, Any] = {}
 
         # For req-level memory management
         self.kv_committed_len = 0

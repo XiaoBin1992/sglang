@@ -20,4 +20,5 @@ def _import_request_cache():
             f"Failed to import RequestCache from {module_path}: {e}. "
             f"Falling back to default sglang.srt.mem_cache.request_cache"
         )
+        return None
 RequestCache = _import_request_cache()

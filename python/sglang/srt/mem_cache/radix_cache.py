@@ -1000,7 +1000,9 @@ class OmniFlowRadixCache(BasePrefixCache):
         self.request_cache.publish_finished_req(req, kv_committed_len)
 
         # Remove req slot, release the cache lock.
-        self.req_to_token_pool.free(req.req_pool_idx)
+        # NOTE: ReqToTokenPool.free now takes the Req itself (not req_pool_idx);
+        # it reads req.req_pool_idx internally and resets it to None.
+        self.req_to_token_pool.free(req)
 
     def cache_unfinished_req(self, req: Req, chunked: bool = False, **kwargs):
         """Cache request when it is unfinished."""

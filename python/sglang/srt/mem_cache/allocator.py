@@ -33,6 +33,12 @@ if TYPE_CHECKING:
 
 
 class BaseTokenToKVPoolAllocator(abc.ABC):
+    # Subclasses that have no contiguous `alloc()` and only support
+    # alloc_extend / alloc_decode should set this to True. Used by
+    # mem_cache.common.alloc_for_extend to pick the paged allocation path
+    # regardless of page_size.
+    requires_paged_alloc: bool = False
+
     @abc.abstractmethod
     def __init__(
         self,
@@ -522,6 +528,10 @@ class PagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
 
 
 class OmniPagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
+    # Slots are owned by RequestCache and exposed via alloc_extend/alloc_decode;
+    # the contiguous `alloc()` path does not apply to this allocator.
+    requires_paged_alloc = True
+
     """
     An allocator managing token-level KV indices that are owned externally
     by an OmniFlow ``RequestCache``.

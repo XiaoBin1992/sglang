@@ -739,9 +739,6 @@ class ModelRunnerKVCacheMixin:
                         ),
                     )
 
-        if RequestCache:
-            RequestCache.get_instance().finish_alloc_static_global_params()
-
         # Initialize token_to_kv_pool_allocator
         need_sort = self.server_args.disaggregation_mode in ("decode", "prefill")
         if self.token_to_kv_pool_allocator is None:

@@ -36,6 +36,7 @@ from sglang.srt.managers.io_struct import (
     DetachHiCacheStorageReqOutput,
     DumperControlReqInput,
     DumperControlReqOutput,
+    EmbeddingLookupReqOutput,
     ExpertDistributionReq,
     ExpertDistributionReqOutput,
     ExpertDistributionReqType,
@@ -238,6 +239,9 @@ class TokenizerCommunicatorMixin:
         self.dumper_control_communicator = _Communicator(
             self.send_to_scheduler, server_args.dp_size
         )
+        self.embedding_lookup_communicator = _Communicator(
+            self.send_to_scheduler, server_args.dp_size
+        )
 
         self._result_dispatcher += self._get_communicator_dispatcher()
 
@@ -339,6 +343,10 @@ class TokenizerCommunicatorMixin:
                 (
                     DumperControlReqOutput,
                     self.dumper_control_communicator.handle_recv,
+                ),
+                (
+                    EmbeddingLookupReqOutput,
+                    self.embedding_lookup_communicator.handle_recv,
                 ),
             ]
         )

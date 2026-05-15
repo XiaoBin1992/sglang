@@ -1126,9 +1126,9 @@ class CudaGraphRunner:
         self.model_runner.cuda_graph_replay(
             forward_batch,
             bs,
-            raw_bs, 
-            [seq_len - self.num_tokens_per_bs for seq_len in seq_lens_cpu[:raw_bs].tolist()] + [0] * (bs - raw_bs), 
-            [self.num_tokens_per_bs] * raw_bs + [1] * (bs - raw_bs), 
+            raw_bs,
+            [seq_len - self.num_tokens_per_bs for seq_len in buffers.seq_lens_cpu[:raw_bs].tolist()] + [0] * (bs - raw_bs),
+            [self.num_tokens_per_bs] * raw_bs + [1] * (bs - raw_bs),
             forward_batch.reqs + [None] * (bs - raw_bs),
         )
         attn_backend.init_forward_metadata_replay_cuda_graph(

@@ -24,6 +24,7 @@ import signal
 import socket
 import sys
 import threading
+import traceback
 from collections import deque
 from contextlib import nullcontext
 from datetime import datetime
@@ -470,10 +471,6 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerScoreMixin):
                 # For handling case when scheduler skips detokenizer and forwards back to the tokenizer manager, we ignore it.
                 (HealthCheckOutput, lambda x: None),
                 (ActiveRanksOutput, self.update_active_ranks),
-                (
-                    EmbeddingLookupReqOutput,
-                    self.embedding_lookup,
-                ),
             ]
         )
         self.init_communicators(self.server_args)
@@ -1628,6 +1625,14 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerScoreMixin):
             if getattr(recv_obj, "customized_info", None):
                 for k, v in recv_obj.customized_info.items():
                     meta_info[k] = v[i]
+            # Forward per-req opaque extra info populated by business code
+            # (e.g. omni_flow attaches output tensor descriptors via
+            # Req.output_extra_info). Surfaced at the top level of out_dict to
+            # match the fluentllm contract.
+            req_output_extra_info = None
+            if getattr(recv_obj, "output_extra_infos", None):
+                if i < len(recv_obj.output_extra_infos):
+                    req_output_extra_info = recv_obj.output_extra_infos[i]
             if getattr(recv_obj, "dp_ranks", None):
                 meta_info["dp_rank"] = recv_obj.dp_ranks[i]
 
@@ -1651,6 +1656,8 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerScoreMixin):
                     "output_ids": output_token_ids,
                     "meta_info": meta_info,
                 }
+                if req_output_extra_info is not None:
+                    out_dict["output_extra_info"] = req_output_extra_info
 
             elif isinstance(recv_obj, BatchTokenIDOutput):
                 is_stream = getattr(state.obj, "stream", False)
@@ -1666,6 +1673,8 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerScoreMixin):
                     "output_ids": output_token_ids,
                     "meta_info": meta_info,
                 }
+                if req_output_extra_info is not None:
+                    out_dict["output_extra_info"] = req_output_extra_info
             else:
                 assert isinstance(recv_obj, BatchEmbeddingOutput)
                 out_dict = {

@@ -518,6 +518,13 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         )
         self.enable_overlap = not server_args.disable_overlap_schedule
         if self.server_args.enable_request_cache:
+            if RequestCache is None:
+                raise RuntimeError(
+                    "enable_request_cache is set but RequestCache failed to load. "
+                    "Check that the environment variable REQUEST_CACHE_MODULE_PATH is correct "
+                    "and that the module can be imported without circular dependency errors. "
+                    f"REQUEST_CACHE_MODULE_PATH={__import__('os').getenv('REQUEST_CACHE_MODULE_PATH', '')}"
+                )
             RequestCache.get_instance(self.server_args, gpu_id=self.gpu_id, run_device=self.device, create=False)\
                 .init_buffer(self.model_config, self.model, self)
         

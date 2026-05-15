@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -958,6 +958,10 @@ class SchedulerOutputProcessorMixin:
         load = self.get_load()
         routed_experts = None
         customized_info = {}
+        # Per-req opaque metadata (e.g. omni_flow output tensor descriptors).
+        # Stays None when no req populates Req.output_extra_info, so existing
+        # paths see no behavior change.
+        output_extra_infos: Optional[List[Dict[str, Any]]] = None
 
         time_stats = []
 
@@ -1149,6 +1153,22 @@ class SchedulerOutputProcessorMixin:
                             v[send_token_offset : len(output_ids_)]
                         )
 
+                # Mirror fluentllm: stamp decode_prefix_len and forward the
+                # per-req extra info bag downstream when the business layer
+                # populated it.
+                req_extra_info = getattr(req, "output_extra_info", None)
+                if req_extra_info:
+                    req_extra_info["decode_prefix_len"] = getattr(
+                        req, "prefix_len", 0
+                    )
+                    if output_extra_infos is None:
+                        output_extra_infos = []
+                    output_extra_infos.append(req_extra_info)
+                elif output_extra_infos is not None:
+                    # Keep alignment with rids when some reqs in the batch did
+                    # populate extra info but this one didn't.
+                    output_extra_infos.append({})
+
             if (
                 req.finished()
                 and self.attn_tp_rank == 0
@@ -1197,6 +1217,7 @@ class SchedulerOutputProcessorMixin:
                     output_hidden_states=output_hidden_states,
                     routed_experts=routed_experts,
                     customized_info=customized_info,
+                    output_extra_infos=output_extra_infos,
                     placeholder_tokens_idx=None,
                     placeholder_tokens_val=None,
                     retraction_counts=retraction_counts,

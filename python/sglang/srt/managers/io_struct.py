@@ -1025,6 +1025,10 @@ class BatchTokenIDOutput(BaseBatchReq, SpeculativeDecodingMetricsMixin):
     load: GetLoadReqOutput = None
     # Customized info
     customized_info: Optional[Dict[str, List[Any]]] = None
+    # Per-request opaque metadata (one dict per req). Carries fields that
+    # business code attaches to Req.output_extra_info (e.g. omni_flow output
+    # tensor descriptors).
+    output_extra_infos: Optional[List[Dict[str, Any]]] = None
     # Detailed breakdown of cached tokens by source (device/host/storage)
     cached_tokens_details: Optional[List[Optional[Dict[str, Any]]]] = None
     # DP rank of the scheduler that processed each request
@@ -1088,6 +1092,8 @@ class BatchStrOutput(BaseBatchReq, SpeculativeDecodingMetricsMixin):
 
     # Customized info
     customized_info: Optional[Dict[str, List[Any]]] = None
+    # Per-request opaque metadata (one dict per req); see BatchTokenIDOutput.
+    output_extra_infos: Optional[List[Dict[str, Any]]] = None
     # Detailed breakdown of cached tokens by source (device/host/storage)
     cached_tokens_details: Optional[List[Optional[Dict[str, Any]]]] = None
     # DP rank of the scheduler that processed each request
@@ -1941,6 +1947,9 @@ class DumperControlReqOutput(BaseReq):
     success: bool
     response: List[Dict[str, Any]]
     error: str = ""
+
+
+@dataclass
 class EmbeddingLookupReqInput(BaseReq):
     # The input token ids
     input_ids_list: List[List[int]]
