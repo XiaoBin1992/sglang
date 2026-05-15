@@ -6677,6 +6677,8 @@ class ServerArgs:
             type=str,
             default=ServerArgs.msprobe_dump_config,
             help="The path of the JSON configuration file for msProbe. If specified, enables msProbe dump.",
+        )
+        parser.add_argument(
             "--enable-request-cache",
             action="store_true",
             help="enable_request_cache.",
