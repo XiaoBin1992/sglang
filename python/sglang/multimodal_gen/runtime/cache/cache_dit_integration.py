@@ -31,7 +31,12 @@ from cache_dit import (
     steps_mask,
 )
 from cache_dit.caching.block_adapters import BlockAdapterRegister
-from cache_dit.parallelism import ParallelismBackend, ParallelismConfig
+try:
+    from cache_dit.parallelism import ParallelismBackend, ParallelismConfig
+except ModuleNotFoundError:
+    # cache_dit >= 1.3.7 moved these classes to cache_dit.distributed
+    from cache_dit.distributed.backend import ParallelismBackend
+    from cache_dit.distributed.config import ParallelismConfig
 
 from sglang.multimodal_gen.runtime.distributed.parallel_state import get_dit_group
 

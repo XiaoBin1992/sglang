@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(PYTHONPATH=python python *)",
+      "Bash(python3.12 --version)",
+      "Bash(/usr/local/bin/python3.12 *)",
+      "Read(//mnt/hdfs/zw04mlnn01/checkpoint/llm_platform/model/DeepSeek-V2-Lite/**)",
+      "Bash(python3 -c \"import sys, json; c = json.load\\(sys.stdin\\); print\\('rope_scaling=', c.get\\('rope_scaling'\\)\\); print\\('rope_parameters=', c.get\\('rope_parameters'\\)\\); print\\('rope_theta=', c.get\\('rope_theta'\\)\\)\")",
+      "Bash(python3 -c ' *)"
+    ]
+  }
+}

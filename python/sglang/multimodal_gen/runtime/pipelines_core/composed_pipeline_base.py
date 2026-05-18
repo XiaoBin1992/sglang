@@ -379,36 +379,42 @@ class ComposedPipelineBase(ABC):
         self,
         text_encoder_key: str = "text_encoder",
         tokenizer_key: str = "tokenizer",
+        stage_name: str | None = "prompt_encoding_stage",
     ) -> "ComposedPipelineBase":
         return self.add_stage(
             TextEncodingStage(
                 text_encoders=[self.get_module(text_encoder_key)],
                 tokenizers=[self.get_module(tokenizer_key)],
             ),
+            stage_name,
         )
 
     def add_standard_timestep_preparation_stage(
         self,
         scheduler_key: str = "scheduler",
         prepare_extra_kwargs: list[Callable] | None = [],
+        stage_name: str | None = "timestep_preparation_stage",
     ) -> "ComposedPipelineBase":
         return self.add_stage(
             TimestepPreparationStage(
                 scheduler=self.get_module(scheduler_key),
                 prepare_extra_set_timesteps_kwargs=prepare_extra_kwargs,
             ),
+            stage_name,
         )
 
     def add_standard_latent_preparation_stage(
         self,
         scheduler_key: str = "scheduler",
         transformer_key: str = "transformer",
+        stage_name: str | None = "latent_preparation_stage",
     ) -> "ComposedPipelineBase":
         return self.add_stage(
             LatentPreparationStage(
                 scheduler=self.get_module(scheduler_key),
                 transformer=self.get_module(transformer_key),
             ),
+            stage_name,
         )
 
     def add_standard_denoising_stage(
@@ -417,6 +423,7 @@ class ComposedPipelineBase(ABC):
         transformer_2_key: str | None = "transformer_2",
         scheduler_key: str = "scheduler",
         vae_key: str | None = "vae",
+        stage_name: str | None = "denoising_stage",
     ) -> "ComposedPipelineBase":
 
         kwargs = {
@@ -435,11 +442,12 @@ class ComposedPipelineBase(ABC):
                 kwargs["vae"] = vae
                 kwargs["pipeline"] = self
 
-        return self.add_stage(DenoisingStage(**kwargs))
+        return self.add_stage(DenoisingStage(**kwargs), stage_name)
 
     def add_standard_decoding_stage(
         self,
         vae_key: str = "vae",
+        stage_name: str | None = "decoding_stage",
     ) -> "ComposedPipelineBase":
 
         return self.add_stage(
@@ -448,6 +456,7 @@ class ComposedPipelineBase(ABC):
                 pipeline=self,
                 component_name=vae_key,
             ),
+            stage_name,
         )
 
     def add_standard_t2i_stages(
