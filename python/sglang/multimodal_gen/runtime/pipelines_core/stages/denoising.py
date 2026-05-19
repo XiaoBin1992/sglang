@@ -1022,6 +1022,19 @@ class DenoisingStage(PipelineStage):
         ):
             with self.progress_bar(total=num_inference_steps) as progress_bar:
                 for i, t_host in enumerate(timesteps_cpu):
+                    # External cancel hook: external code (e.g. omni_flow's
+                    # DiffusionSglangBackend.cancel_generate) can flip
+                    # ``self.interrupt`` to True between timesteps; we
+                    # break out of the denoising loop here so the in-flight
+                    # forward exits mid-denoise rather than running to
+                    # completion. Mirrors the pattern in
+                    # ``denoising_dmd.py`` and ``glm_image.py``.
+                    if getattr(self, "interrupt", False):
+                        logger.info(
+                            "DenoisingStage: interrupted at step %d/%d",
+                            i, num_inference_steps,
+                        )
+                        break
                     with StageProfiler(
                         f"denoising_step_{i}",
                         logger=logger,
@@ -1511,6 +1524,21 @@ class DenoisingStage(PipelineStage):
         guidance: torch.Tensor,
         **kwargs,
     ):
+        # Cache the last invocation args so external callers (e.g.
+        # OmniFlow's DiffusionSglangBackend._do_pos_recompute) can replay
+        # a single positive forward without re-deriving the full denoising
+        # context. Keeping references is cheap — these tensors are also
+        # held by the caller for the duration of one timestep — and is
+        # cleared on each new step automatically since this method is
+        # called every step.
+        self._last_predict_args = {
+            "current_model": current_model,
+            "latent_model_input": latent_model_input,
+            "timestep": timestep,
+            "target_dtype": target_dtype,
+            "guidance": guidance,
+            **kwargs,
+        }
         return current_model(
             hidden_states=latent_model_input,
             timestep=timestep,
