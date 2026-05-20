@@ -678,8 +678,25 @@ class DefaultModelLoader(BaseModelLoader):
 
         target_device = torch.device(device_config.device)
         quant_config = _get_quantization_config(model_config, self.load_config)
+        # 当开启 enable_request_cache 时，模型构造改走 meta device，避免每个进程
+        # 都先 torch.empty 出一份本地实存（rebind 阶段会再 alloc 一份共享 tensor，
+        # 两者并存即 2W 峰值）。meta 上的参数 0 显存占用，rebind 时直接替换为
+        # MM 共享 tensor，本进程显存增量等于 W（首进程）或 0（后进程命中缓存）。
+        if os.environ.get("OMNI_FLOW_SHARED_WEIGHT", "1") != '0':
+            try:
+                from sglang.srt.server_args import get_global_server_args
+                _enable_shared_weights = getattr(
+                    get_global_server_args(), "enable_request_cache", False
+                )
+            except Exception:
+                _enable_shared_weights = False
+        else:
+            _enable_shared_weights = False
+        construction_device = (
+            torch.device("meta") if _enable_shared_weights else target_device
+        )
         with set_default_torch_dtype(model_config.dtype):
-            with target_device:
+            with construction_device:
                 model = _initialize_model(
                     model_config,
                     self.load_config,
@@ -694,8 +711,59 @@ class DefaultModelLoader(BaseModelLoader):
         return model.eval()
 
     @staticmethod
+    def _materialize_buffers_on_device(model, target_device):
+        """把模型中仍在 meta 上的 buffer (非 Parameter) materialize 到真实 device。
+        Parameter 由 rebind_model_params_to_shared_weights 接管，这里只补 buffer。
+        """
+        import torch as _torch
+        for module in model.modules():
+            for name, buf in list(module.named_buffers(recurse=False)):
+                if buf is None:
+                    continue
+                if buf.device.type == "meta":
+                    new_buf = _torch.empty(
+                        buf.shape, dtype=buf.dtype, device=target_device
+                    )
+                    persistent = name not in module._non_persistent_buffers_set
+                    module.register_buffer(name, new_buf, persistent=persistent)
+
+    @staticmethod
     def load_weights_and_postprocess(model, weights, target_device):
-        model.load_weights(weights)
+        try:
+            from sglang.srt.server_args import get_global_server_args
+            _server_args = get_global_server_args()
+        except Exception:
+            _server_args = None
+        owned_shared_weights = []
+        enable_shared = (
+            _server_args is not None
+            and getattr(_server_args, "enable_request_cache", False)
+            and os.environ.get("OMNI_FLOW_SHARED_WEIGHT", "1") != "0"
+        )
+        if enable_shared:
+            from omni_flow.compute_flow.llm.request_cache import (
+                rebind_model_params_to_shared_weights,
+                mark_owned_weights_loaded,
+            )
+            # 1) 替换 Parameter 为共享 tensor（meta → cuda 共享显存）。
+            #    rebind 失败时它内部已经把已 own 的 name 全部 mark；这里直接抛出，
+            #    不做 fallback——因为 model 已经处于半 rebind 半 meta 的混合状态，
+            #    继续走会让 forward 拿到未初始化的 meta tensor，问题更难诊断。
+            owned_shared_weights = rebind_model_params_to_shared_weights(
+                model, target_device
+            )
+            # 2) 模型里的非参数 buffer 还停在 meta 上，手动 materialize 到真实 device
+            DefaultModelLoader._materialize_buffers_on_device(model, target_device)
+
+            # 3) 必须用 try/finally 保证 mark：否则 model.load_weights 抛错时，
+            #    owner 已 alloc 的所有 name 永远停在 loading 状态，其它进程的
+            #    alloc RPC 会永久阻塞 → 整个集群死锁。
+            try:
+                model.load_weights(weights)
+            finally:
+                mark_owned_weights_loaded(owned_shared_weights)
+        else:
+            model.load_weights(weights)
 
         for _, module in model.named_modules():
             quant_method = getattr(module, "quant_method", None)
