@@ -194,6 +194,7 @@ def get_model_architecture(model_config: ModelConfig) -> Tuple[Type[nn.Module], 
     from sglang.srt.models.registry import ModelRegistry
 
     architectures = getattr(model_config.hf_config, "architectures", [])
+    architectures = getattr(model_config.hf_config, "omni_architectures", architectures)
     # Special handling for quantized Mixtral.
     # FIXME(woosuk): This is a temporary hack.
     mixtral_supported = [
@@ -218,7 +219,6 @@ def get_model_architecture(model_config: ModelConfig) -> Tuple[Type[nn.Module], 
         architectures = ["MindSporeForCausalLM"]
     elif not is_native_supported or model_config.model_impl == ModelImpl.TRANSFORMERS:
         architectures = resolve_transformers_arch(model_config, architectures)
-    architectures = getattr(model_config.hf_config, "omni_architectures", architectures)
     model_cls, resolved_arch = ModelRegistry.resolve_model_cls(architectures)
     setattr(model_config, "_resolved_model_arch", resolved_arch)
     setattr(

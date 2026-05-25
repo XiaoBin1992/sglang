@@ -203,6 +203,25 @@ def init_diffusion_kv_pool(
 
     # ---- profile + budget ----
     cell_size = _compute_cell_size(shape, num_kv_heads_per_rank, dtype)
+
+    # OmniFlow KV-pool barrier: 共卡 / layer co-locate 部署下，diffusion 与
+    # 其它 role 共享同一物理 GPU；权重加载速率不一致会让先到此处的 role 在
+    # ``_profile_available_bytes`` 里看到偏大的 free HBM。在读 free 之前对齐
+    # 到所有同步成员都已加载完权重。同步成员集合由 launch driver 在启动期
+    # 推算并通过 ``OMNI_FLOW_KV_BARRIERS`` 环境变量注入；无该环境变量时
+    # ``kv_pool_barrier()`` 立即返回（向后兼容）。
+    #
+    # 走 RequestCache 实例方法（``RequestCache`` 派生于
+    # ``SharedKVAndWeightManager``，``kv_pool_barrier`` 在基类）。omni_flow
+    # 不可见时静默跳过；本进程尚未实例化 RequestCache 时让
+    # ``get_instance()`` 抛 ValueError 显式暴露调用路径错配。
+    try:
+        from sglang.srt.mem_cache.request_cache import RequestCache
+    except ImportError:
+        RequestCache = None
+    if RequestCache is not None:
+        RequestCache.get_instance().kv_pool_barrier()
+
     available_bytes = _profile_available_bytes(
         device=device,
         gpu_id=gpu_id,

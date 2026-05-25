@@ -187,6 +187,10 @@ class GPUWorker:
     def _maybe_init_paged_kv_pool(self, pre_pipeline_load_memory_gb: float):
         if not getattr(self.server_args, "enable_paged_kv_cache", False):
             return None
+        from sglang.srt.mem_cache.request_cache import RequestCache
+        if RequestCache is not None:
+            RequestCache.get_instance(server_args, gpu_id=gpu_id, run_device=device, create=False)
+        
         from sglang.multimodal_gen.runtime.managers.kv_pool_initializer import (
             init_diffusion_kv_pool,
         )

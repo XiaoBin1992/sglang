@@ -678,19 +678,18 @@ class DefaultModelLoader(BaseModelLoader):
 
         target_device = torch.device(device_config.device)
         quant_config = _get_quantization_config(model_config, self.load_config)
-        # 当开启 enable_request_cache 时，模型构造改走 meta device，避免每个进程
-        # 都先 torch.empty 出一份本地实存（rebind 阶段会再 alloc 一份共享 tensor，
-        # 两者并存即 2W 峰值）。meta 上的参数 0 显存占用，rebind 时直接替换为
-        # MM 共享 tensor，本进程显存增量等于 W（首进程）或 0（后进程命中缓存）。
-        if os.environ.get("OMNI_FLOW_SHARED_WEIGHT", "1") != '0':
-            try:
-                from sglang.srt.server_args import get_global_server_args
-                _enable_shared_weights = getattr(
-                    get_global_server_args(), "enable_request_cache", False
-                )
-            except Exception:
-                _enable_shared_weights = False
-        else:
+        # 当开启共享权重时，模型构造改走 meta device，避免每个进程都先 torch.empty
+        # 出一份本地实存（rebind 阶段会再 alloc 一份共享 tensor，两者并存即 2W 峰值）。
+        # meta 上的参数 0 显存占用，rebind 时直接替换为 MM 共享 tensor，本进程显存
+        # 增量等于 W（首进程）或 0（后进程命中缓存）。
+        # 总开关由 is_shared_weight_enabled() 统一判断（环境变量 OMNI_FLOW_SHARED_WEIGHT
+        # + server_args.enable_request_cache）。
+        try:
+            from omni_flow.compute_flow.utils.sglang_share_weight import (
+                is_shared_weight_enabled,
+            )
+            _enable_shared_weights = is_shared_weight_enabled()
+        except Exception:
             _enable_shared_weights = False
         construction_device = (
             torch.device("meta") if _enable_shared_weights else target_device
@@ -730,18 +729,15 @@ class DefaultModelLoader(BaseModelLoader):
     @staticmethod
     def load_weights_and_postprocess(model, weights, target_device):
         try:
-            from sglang.srt.server_args import get_global_server_args
-            _server_args = get_global_server_args()
+            from omni_flow.compute_flow.utils.sglang_share_weight import (
+                is_shared_weight_enabled,
+            )
+            enable_shared = is_shared_weight_enabled()
         except Exception:
-            _server_args = None
+            enable_shared = False
         owned_shared_weights = []
-        enable_shared = (
-            _server_args is not None
-            and getattr(_server_args, "enable_request_cache", False)
-            and os.environ.get("OMNI_FLOW_SHARED_WEIGHT", "1") != "0"
-        )
         if enable_shared:
-            from omni_flow.compute_flow.llm.request_cache import (
+            from omni_flow.compute_flow.utils.sglang_share_weight import (
                 rebind_model_params_to_shared_weights,
                 mark_owned_weights_loaded,
             )

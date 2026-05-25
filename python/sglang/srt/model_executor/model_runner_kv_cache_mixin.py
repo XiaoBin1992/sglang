@@ -145,6 +145,13 @@ class ModelRunnerKVCacheMixin:
         return cell_size
 
     def profile_max_num_token(self: ModelRunner, pre_model_load_memory: int):
+        try:
+            from sglang.srt.mem_cache.request_cache import RequestCache
+        except ImportError:
+            RequestCache = None
+        if RequestCache is not None:
+            RequestCache.get_instance().kv_pool_barrier()
+
         post_model_load_memory = get_available_gpu_memory(
             self.device,
             self.gpu_id,

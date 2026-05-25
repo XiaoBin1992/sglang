@@ -435,6 +435,24 @@ class Scheduler(
         # Init the grammar backend for constrained generation
         self.grammar_manager = GrammarManager(self)
 
+        # ── Optional external short-cut hooks ─────────────────────────────
+        # The same ``REQUEST_CACHE_MODULE_PATH`` env that selects the
+        # RequestCache subclass (see sglang.srt.mem_cache.request_cache)
+        # also controls which Scheduler hooks get registered: if the
+        # resolved subclass exposes ``register_diffusion_hooks(scheduler)``
+        # we call it. Used by the diffusion-role LLM-backbone path to
+        # attach ``forward_for_diffusion`` / ``diffusion_backbone_ping``
+        # without modifying Scheduler source code.
+        if RequestCache:
+            request_cache = RequestCache.get_instance()
+            if hasattr(request_cache, "register_diffusion_hooks"):
+                getattr(RequestCache, "register_diffusion_hooks")(self)
+                logger.info(
+                    f"[diffusion_backbone] {RequestCache.__module__}."
+                    f"{RequestCache.__name__}.register_diffusion_hooks "
+                    f"installed on Scheduler tp_rank={self.tp_rank}"
+                )
+
         self.is_initializing = False
 
     def init_model_config(self):
