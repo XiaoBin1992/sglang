@@ -240,6 +240,40 @@ def init_diffusion_kv_pool(
             max_total_num_tokens, (cap // page_size) * page_size
         )
 
+    # 跨 role KV pool 共享：在 alloc 之前先和 MM 协商 page_count，让
+    # diffusion 与 LLM 看到一致的 final page_count，避免 alloc 阶段重建
+    # buffer 触发 page_count mismatch + 双份显存。语义见
+    # SharedKVAndWeightManager.sync_global_params_page_count 注释。
+    # RequestCache 不可见时（纯 sglang 场景）静默跳过。
+    if RequestCache is not None and max_total_num_tokens > 0:
+        try:
+            local_page_count = max_total_num_tokens // page_size
+            sync_device = (
+                f"cuda:{gpu_id}" if device == "cuda" else device
+            )
+            final_pc = RequestCache.get_instance().sync_global_params_page_count(
+                name="kv_cache",
+                page_size=page_size,
+                device=sync_device,
+                proposed_page_count=local_page_count,
+            )
+            if final_pc is not None and final_pc != local_page_count:
+                logger.info(
+                    "init_diffusion_kv_pool: page_count synced "
+                    "local=%d -> shared=%d (page_size=%d); "
+                    "adjusting max_total_num_tokens accordingly",
+                    local_page_count,
+                    final_pc,
+                    page_size,
+                )
+                max_total_num_tokens = final_pc * page_size
+        except Exception as _e:
+            logger.warning(
+                "init_diffusion_kv_pool: sync_global_params_page_count failed "
+                "(falling back to local-only token capacity): %s",
+                _e,
+            )
+
     if max_total_num_tokens <= 0:
         raise RuntimeError(
             "Not enough GPU memory for diffusion KV cache. "

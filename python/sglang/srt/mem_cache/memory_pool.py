@@ -189,6 +189,14 @@ class ReqToTokenPool:
 
 
 def _alloc_kv_cache(sub_names, layer_ids, page_count, page_size, head_ids, dtype, device, first_n_token_for_dummy_output=None, view_shape=None, sliding_window_size=None, shapes=None, shape=None):
+    """分配 KV cache buffer。
+
+    跨 role 共享 KV pool 时 ``page_count`` 在 ``profile_max_num_token`` 阶段已经
+    通过 ``MMClient.sync_global_params_page_count`` 在 MM 端协商一致（取所有同
+    (name, device) 成员中的最小值并持久化到 slot），所以走到这里时各 role 的
+    ``page_count`` 必然相同，``alloc_global_params(reuse=True)`` 命中先到方的
+    PagedMemory 即可，无需 mismatch 处理。
+    """
     # Accept both `shapes` and `shape` to be compatible with legacy callers
     # that wrote `shape=...`. Whichever is non-None wins.
     if shapes is None:
@@ -199,31 +207,28 @@ def _alloc_kv_cache(sub_names, layer_ids, page_count, page_size, head_ids, dtype
         sub_names = [sub_names]
     if isinstance(layer_ids, int):
         layer_ids = [layer_ids]
-    
+
     from sglang.srt.mem_cache.request_cache import RequestCache
     if RequestCache and RequestCache.get_instance().enable_request_cache == 2:
-        # reuse=False: kv_cache 不应复用 page_count 不同的旧 tensor，否则 view() 会因元素数不匹配而崩溃。
-        # alloc_global_params 返回 (tensor, actual_page_count)，需根据实际 page_count 重算 view_shape。
-        tensor, actual_page_count = RequestCache.get_instance().alloc_global_params("kv_cache",
-            sub_names, 
+        tensor, _actual_page_count = RequestCache.get_instance().alloc_global_params("kv_cache",
+            sub_names,
             layer_ids,
-            page_count, 
+            page_count,
             page_size,
             head_ids,
             shapes,
-            dtype, 
+            dtype,
             device,
             first_n_token_for_dummy_output=first_n_token_for_dummy_output,
             sliding_window_size=sliding_window_size,
-            reuse=False,
+            reuse=True,
         )
-        # 根据实际分配的 page_count 重新计算 view_shape（每个维度除第 0 维以外保持不变）
-        if view_shape and actual_page_count != page_count:
-            # view_shape[0] 的公式为: actual_page_count * page_size + first_n_token_for_dummy_output
-            actual_first_dim = actual_page_count * page_size + first_n_token_for_dummy_output
+        # 经 profile 阶段的 sync 校准，actual 应当等于 page_count；若不等说明
+        # MM slot 协议出现 bug，按 actual 重算 view 仍可避免 crash。
+        if view_shape and _actual_page_count != page_count:
+            actual_first_dim = _actual_page_count * page_size + first_n_token_for_dummy_output
             view_shape = (actual_first_dim, *view_shape[1:])
     else:
-        actual_page_count = page_count
         dummy = first_n_token_for_dummy_output or 0
         tensor = torch.zeros((page_count * page_size + dummy, len(head_ids), *shapes), dtype=dtype, device=device)
 

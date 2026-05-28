@@ -184,7 +184,38 @@ class ModelRunnerKVCacheMixin:
         if self.mambaish_config is not None:
             rest_memory = self.handle_max_mamba_cache(rest_memory)
 
-        return int(rest_memory * (1 << 30)) // cell_size
+        local_token_capacity = int(rest_memory * (1 << 30)) // cell_size
+
+        # 跨 role 共享 KV pool 的 page_count 协商：在本进程算出 local_token_capacity
+        # 之后，立即把它换算成 page_count 上报到 MM 端的 SlotsManager slot；
+        # 后到方会把 slot 收紧成所有成员中最小的 page_count，全员对齐后再继续
+        # alloc。这样 alloc_global_params 阶段不会出现 page_count mismatch，
+        # buffer 就一份物理显存。
+        if RequestCache is not None:
+            try:
+                page_size = max(int(getattr(self, "page_size", 1) or 1), 1)
+                local_page_count = max(local_token_capacity // page_size, 0)
+                if local_page_count > 0:
+                    final_pc = RequestCache.get_instance().sync_global_params_page_count(
+                        name="kv_cache",
+                        page_size=page_size,
+                        device=f"cuda:{self.gpu_id}" if self.device == "cuda" else self.device,
+                        proposed_page_count=local_page_count,
+                    )
+                    if final_pc is not None and final_pc != local_page_count:
+                        logger.info(
+                            f"profile_max_num_token: page_count synced "
+                            f"local={local_page_count} -> shared={final_pc}; "
+                            f"adjusting token capacity accordingly"
+                        )
+                        local_token_capacity = final_pc * page_size
+            except Exception as _e:
+                logger.warning(
+                    f"profile_max_num_token: sync_global_params_page_count failed "
+                    f"(falling back to local-only token capacity): {_e}"
+                )
+
+        return local_token_capacity
 
     def handle_max_mamba_cache(self: ModelRunner, total_rest_memory):
         config = self.mambaish_config

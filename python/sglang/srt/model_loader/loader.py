@@ -682,13 +682,13 @@ class DefaultModelLoader(BaseModelLoader):
         # 出一份本地实存（rebind 阶段会再 alloc 一份共享 tensor，两者并存即 2W 峰值）。
         # meta 上的参数 0 显存占用，rebind 时直接替换为 MM 共享 tensor，本进程显存
         # 增量等于 W（首进程）或 0（后进程命中缓存）。
-        # 总开关由 is_shared_weight_enabled() 统一判断（环境变量 OMNI_FLOW_SHARED_WEIGHT
-        # + server_args.enable_request_cache）。
+        # 总开关由 SharedKVAndWeightManager.is_shared_weight_enabled() 统一判断
+        # （环境变量 OMNI_FLOW_SHARED_WEIGHT + server_args.enable_request_cache）。
         try:
-            from omni_flow.compute_flow.utils.sglang_share_weight import (
-                is_shared_weight_enabled,
+            from omni_flow.compute_flow.utils.shared_kv_and_weight import (
+                SharedKVAndWeightManager,
             )
-            _enable_shared_weights = is_shared_weight_enabled()
+            _enable_shared_weights = SharedKVAndWeightManager.is_shared_weight_enabled()
         except Exception:
             _enable_shared_weights = False
         construction_device = (
@@ -729,23 +729,20 @@ class DefaultModelLoader(BaseModelLoader):
     @staticmethod
     def load_weights_and_postprocess(model, weights, target_device):
         try:
-            from omni_flow.compute_flow.utils.sglang_share_weight import (
-                is_shared_weight_enabled,
+            from omni_flow.compute_flow.utils.shared_kv_and_weight import (
+                SharedKVAndWeightManager,
             )
-            enable_shared = is_shared_weight_enabled()
+            enable_shared = SharedKVAndWeightManager.is_shared_weight_enabled()
         except Exception:
             enable_shared = False
         owned_shared_weights = []
         if enable_shared:
-            from omni_flow.compute_flow.utils.sglang_share_weight import (
-                rebind_model_params_to_shared_weights,
-                mark_owned_weights_loaded,
-            )
+            mgr = SharedKVAndWeightManager.get_instance()
             # 1) 替换 Parameter 为共享 tensor（meta → cuda 共享显存）。
             #    rebind 失败时它内部已经把已 own 的 name 全部 mark；这里直接抛出，
             #    不做 fallback——因为 model 已经处于半 rebind 半 meta 的混合状态，
             #    继续走会让 forward 拿到未初始化的 meta tensor，问题更难诊断。
-            owned_shared_weights = rebind_model_params_to_shared_weights(
+            owned_shared_weights = mgr.rebind_model_params_to_shared_weights(
                 model, target_device
             )
             # 2) 模型里的非参数 buffer 还停在 meta 上，手动 materialize 到真实 device
@@ -757,7 +754,7 @@ class DefaultModelLoader(BaseModelLoader):
             try:
                 model.load_weights(weights)
             finally:
-                mark_owned_weights_loaded(owned_shared_weights)
+                mgr.mark_owned_weights_loaded(owned_shared_weights)
         else:
             model.load_weights(weights)
 
