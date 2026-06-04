@@ -678,12 +678,11 @@ class DefaultModelLoader(BaseModelLoader):
 
         target_device = torch.device(device_config.device)
         quant_config = _get_quantization_config(model_config, self.load_config)
-        # 当开启共享权重时，模型构造改走 meta device，避免每个进程都先 torch.empty
-        # 出一份本地实存（rebind 阶段会再 alloc 一份共享 tensor，两者并存即 2W 峰值）。
-        # meta 上的参数 0 显存占用，rebind 时直接替换为 MM 共享 tensor，本进程显存
-        # 增量等于 W（首进程）或 0（后进程命中缓存）。
-        # 总开关由 SharedKVAndWeightManager.is_shared_weight_enabled() 统一判断
-        # （环境变量 OMNI_FLOW_SHARED_WEIGHT + server_args.enable_request_cache）。
+        # 共享权重路径：用 SharedWeightAllocator 在构造期直接把 Parameter 和
+        # persistent buffer 落到 IPC 共享显存，避免 "本地分配 → rebind → 释放"
+        # 的瞬时双份峰值；non-persistent buffer / __init__ 现算张量保留在
+        # target_device 本地（每个 worker 各一份，量级很小）。
+        # 总开关由 SharedKVAndWeightManager.is_shared_weight_enabled() 统一判断。
         try:
             from omni_flow.compute_flow.utils.shared_kv_and_weight import (
                 SharedKVAndWeightManager,
@@ -691,40 +690,150 @@ class DefaultModelLoader(BaseModelLoader):
             _enable_shared_weights = SharedKVAndWeightManager.is_shared_weight_enabled()
         except Exception:
             _enable_shared_weights = False
-        construction_device = (
-            torch.device("meta") if _enable_shared_weights else target_device
-        )
-        with set_default_torch_dtype(model_config.dtype):
-            with construction_device:
-                model = _initialize_model(
-                    model_config,
-                    self.load_config,
-                    quant_config,
-                )
 
-            self.load_weights_and_postprocess(
-                model, self._get_all_weights(model_config, model), target_device
-            )
+        with set_default_torch_dtype(model_config.dtype):
+            if _enable_shared_weights:
+                from omni_flow.compute_flow.utils.shared_weight_allocator import (
+                    SharedWeightAllocator,
+                )
+                mgr = SharedKVAndWeightManager.get_instance()
+                model_class, _ = get_model_architecture(model_config)
+                allocator = SharedWeightAllocator(
+                    manager=mgr,
+                    target_device=target_device,
+                    model_class_name=model_class.__name__,
+                )
+                with allocator:
+                    model = _initialize_model(
+                        model_config,
+                        self.load_config,
+                        quant_config,
+                    )
+                # 退出上下文后按真实 fqn 替换 meta Parameter / persistent buffer
+                # 为 IPC 共享 tensor（带 root prefix=model_class_name 避免撞名）
+                owned = allocator.finalize(model)
+                # owner 写 IPC、follower SkipCopy；mark_owned 必须 try/finally
+                try:
+                    model.load_weights(self._get_all_weights(model_config, model))
+                finally:
+                    mgr.mark_owned_weights_loaded(owned)
+                # quantization post-load 仍走原 hook
+                for _, module in model.named_modules():
+                    quant_method = getattr(module, "quant_method", None)
+                    if quant_method is not None:
+                        with device_loading_context(module, target_device):
+                            quant_method.process_weights_after_loading(module)
+            else:
+                with target_device:
+                    model = _initialize_model(
+                        model_config,
+                        self.load_config,
+                        quant_config,
+                    )
+                self.load_weights_and_postprocess(
+                    model, self._get_all_weights(model_config, model), target_device
+                )
 
         self.counter_after_loading_weights = time.perf_counter()
         return model.eval()
 
     @staticmethod
     def _materialize_buffers_on_device(model, target_device):
-        """把模型中仍在 meta 上的 buffer (非 Parameter) materialize 到真实 device。
+        """把 meta 模型中仍在 meta 上的 buffer materialize 到真实 device，并填充正确值。
+
         Parameter 由 rebind_model_params_to_shared_weights 接管，这里只补 buffer。
+
+        根因
+        ----
+        开启共享权重时模型在 meta device 上构造，__init__ 里计算并 register_buffer
+        的 tensor（如 RoPE 的 inv_freq、cos_sin_cache）也变成 meta——只有形状没有值。
+        直接 torch.empty alloc 空间后值是 garbage，forward 读到错误 RoPE → 彩色噪声。
+
+        方案
+        ----
+        遍历每个有 meta buffer 的 module，按优先级重新计算 buffer 值：
+
+        1. _compute_{name}()：sglang 约定的按名 buffer 计算方法（如 _compute_cos_sin_cache,
+           _compute_inv_freq）。临时退出 meta context（set_default_device(None)）后调用，
+           结果在 CPU 上，有正确值。覆盖 sglang 所有内置 RoPE 变种。
+
+        2. reset_parameters()：module 自定义的重初始化入口。先把 meta buffer 替换为
+           CPU empty（让写入能成功），再调用 reset_parameters()，之后读 CPU 值。
+
+        3. 兜底 empty：对 persistent buffer 无影响（load_weights 会覆盖）；
+           对 non-persistent buffer 为 garbage，但此类 buffer 通常很少见。
         """
-        import torch as _torch
-        for module in model.modules():
-            for name, buf in list(module.named_buffers(recurse=False)):
-                if buf is None:
+        prev_device = torch.get_default_device()
+        try:
+            torch.set_default_device(None)  # 退出 meta，让计算落在 CPU
+            for module in model.modules():
+                # 收集当前 module 的所有 meta buffer
+                meta_buf_names = [
+                    name for name, buf in module._buffers.items()
+                    if buf is not None and buf.device.type == "meta"
+                ]
+                if not meta_buf_names:
                     continue
-                if buf.device.type == "meta":
-                    new_buf = _torch.empty(
-                        buf.shape, dtype=buf.dtype, device=target_device
-                    )
-                    persistent = name not in module._non_persistent_buffers_set
-                    module.register_buffer(name, new_buf, persistent=persistent)
+
+                # 策略1：per-buffer _compute_{name}()
+                remaining = []
+                for name in meta_buf_names:
+                    buf = module._buffers[name]
+                    compute_fn = getattr(module, f"_compute_{name}", None)
+                    if compute_fn is not None:
+                        try:
+                            result = compute_fn()
+                            if isinstance(result, torch.Tensor) and result.shape == buf.shape:
+                                new_buf = result.to(dtype=buf.dtype, device=target_device)
+                                persistent = name not in module._non_persistent_buffers_set
+                                module.register_buffer(name, new_buf, persistent=persistent)
+                                continue
+                        except Exception:
+                            pass
+                    remaining.append(name)
+
+                if not remaining:
+                    continue
+
+                # 策略2：reset_parameters()（整体重算）
+                if hasattr(module, "reset_parameters"):
+                    try:
+                        # 先把 meta buffer 换成 CPU empty，让 reset_parameters 能写入
+                        saved = {}
+                        for name in remaining:
+                            buf = module._buffers[name]
+                            saved[name] = buf
+                            module._buffers[name] = torch.empty(
+                                buf.shape, dtype=buf.dtype, device="cpu"
+                            )
+                        module.reset_parameters()
+                        # 读取 CPU 值，搬到 target_device
+                        for name in remaining:
+                            b = module._buffers[name]
+                            if b is not None and b.device.type != "meta":
+                                new_buf = b.to(device=target_device)
+                            else:
+                                new_buf = torch.empty(
+                                    saved[name].shape, dtype=saved[name].dtype, device=target_device
+                                )
+                            persistent = name not in module._non_persistent_buffers_set
+                            module.register_buffer(name, new_buf, persistent=persistent)
+                        remaining = []
+                    except Exception:
+                        # reset_parameters 失败：恢复 meta buffer，走兜底
+                        for name in remaining:
+                            if name in saved:
+                                module._buffers[name] = saved[name]
+
+                # 策略3：兜底 empty
+                for name in remaining:
+                    buf = module._buffers[name]
+                    if buf is not None and buf.device.type == "meta":
+                        new_buf = torch.empty(buf.shape, dtype=buf.dtype, device=target_device)
+                        persistent = name not in module._non_persistent_buffers_set
+                        module.register_buffer(name, new_buf, persistent=persistent)
+        finally:
+            torch.set_default_device(prev_device)
 
     @staticmethod
     def load_weights_and_postprocess(model, weights, target_device):
@@ -745,7 +854,7 @@ class DefaultModelLoader(BaseModelLoader):
             owned_shared_weights = mgr.rebind_model_params_to_shared_weights(
                 model, target_device
             )
-            # 2) 模型里的非参数 buffer 还停在 meta 上，手动 materialize 到真实 device
+            # 2) 模型里的非参数 buffer 还停在 meta 上，重新计算并 materialize 到真实 device
             DefaultModelLoader._materialize_buffers_on_device(model, target_device)
 
             # 3) 必须用 try/finally 保证 mark：否则 model.load_weights 抛错时，
